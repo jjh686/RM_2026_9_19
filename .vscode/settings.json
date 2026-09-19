@@ -1,0 +1,38 @@
+﻿{
+    "cmake.configureOnOpen": false,
+    "files.associations": {
+        "stm32f4xx_hal_def.h": "c",
+        "bsp_usb.h": "c",
+        "usb_device.h": "c",
+        "usbd_cdc.h": "c",
+        "usbd_conf.h": "c",
+        "usbd_desc.h": "c",
+        "usbd_cdc_if.h": "c",
+        "chassis.h": "c",
+        "remote_control.h": "c",
+        "arm_math.h": "c",
+        "can_comm.h": "c",
+        "dji_motor.h": "c",
+        "bsp_log.h": "c"
+    },
+    "stm32-for-vscode.makePath": false,
+    "makefile.makePath": "D:\\MSYS2\\mingw64\\bin\\mingw32-make.exe",
+    "makefile.makefilePath": "${workspaceFolder}\\Makefile",
+    "makefile.makeDirectory": "${workspaceFolder}",
+    "makefile.configureOnOpen": false,
+    "makefile.configureOnEdit": false,
+    "makefile.configurations": [
+        {
+            "name": "STM32F407",
+            "makePath": "D:\\MSYS2\\mingw64\\bin\\mingw32-make.exe",
+            "makefilePath": "${workspaceFolder}\\Makefile",
+            "makeDirectory": "${workspaceFolder}",
+            "makeArgs": ["-j24"]
+        }
+    ],
+    "cortex-debug.armToolchainPath": "D:\\MSYS2\\ucrt64\\bin",
+    "cortex-debug.gdbPath.windows": "D:\\BaiduNetdiskDownload\\RM\\archive\\EC\\VSCode+Ozone鐜閰嶇疆\\gcc-arm-none-eabi-10.3-2021.10-win32\\Arm-GNU-Toolchian\\bin\\arm-none-eabi-gdb.exe",
+    "cortex-debug.openocdPath": "D:\\MSYS2\\mingw64\\bin\\openocd.exe",
+    "cortex-debug.JLinkGDBServerPath": "D:\\Jlink\\JLinkGDBServerCL.exe"
+}
+

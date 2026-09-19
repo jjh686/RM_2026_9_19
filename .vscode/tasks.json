@@ -1,0 +1,69 @@
+{
+    // See https://go.microsoft.com/fwlink/?LinkId=733558
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "build task",
+            "type": "process",
+            "command": "D:\\MSYS2\\mingw64\\bin\\mingw32-make.exe",
+            "args": ["-j24"],
+            "options": {
+                "env": {
+                    "PATH": "D:\\MSYS2\\mingw64\\bin;D:\\MSYS2\\ucrt64\\bin;${env:PATH}"
+                }
+            },
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated",
+                "clear": true
+            },
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            }
+        },
+        {
+            "label": "download dap",
+            "type": "shell",
+            "command": "mingw32-make -j24 ; mingw32-make download_dap",
+            "options": {
+                "env": {
+                    "PATH": "D:\\MSYS2\\mingw64\\bin;D:\\MSYS2\\ucrt64\\bin;D:\\Jlink;${env:PATH}"
+                }
+            },
+            "group": {
+                "kind": "build",
+                "isDefault": false
+            }
+        },
+        {
+            "label": "download jlink",
+            "type": "shell",
+            "command": "mingw32-make -j24 ; mingw32-make download_jlink",
+            "options": {
+                "env": {
+                    "PATH": "D:\\MSYS2\\mingw64\\bin;D:\\MSYS2\\ucrt64\\bin;D:\\Jlink;${env:PATH}"
+                }
+            },
+            "group": {
+                "kind": "build",
+                "isDefault": false
+            }
+        },
+        {
+            "label": "log",
+            "type": "shell",
+            "command": "D:\\Jlink\\JLinkRTTClient.exe",
+            "args": [],
+            "problemMatcher": []
+        },
+        {
+            "type": "cmake",
+            "label": "CMake: 清理",
+            "command": "clean",
+            "problemMatcher": [],
+            "detail": "CMake 模板 清理 任务"
+        }
+    ]
+}
