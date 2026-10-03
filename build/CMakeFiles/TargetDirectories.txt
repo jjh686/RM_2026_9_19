@@ -1,0 +1,3 @@
+D:/Edge Download/basic_framework-master/build/CMakeFiles/basic_framework.elf.dir
+D:/Edge Download/basic_framework-master/build/CMakeFiles/edit_cache.dir
+D:/Edge Download/basic_framework-master/build/CMakeFiles/rebuild_cache.dir
