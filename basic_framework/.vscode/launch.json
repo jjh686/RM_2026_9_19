@@ -77,5 +77,17 @@
             "svdFile": "STM32F407.svd",
             "rtos": "FreeRTOS",
         },
+
+        {
+        "name": "EmberProbe",
+        "type": "emberprobe",
+        "request": "launch",
+        "cwd": "${workspaceFolder}",
+        "executable": "${workspaceFolder}/build/basic_framework.elf",
+        "servertype": "openocd",
+        "runToEntryPoint": "main",
+        "rtos": "FreeRTOS"
+        },
+
     ],
 }
