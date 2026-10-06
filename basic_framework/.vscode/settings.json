@@ -1,4 +1,4 @@
-﻿{
+{
     "cmake.configureOnOpen": false,
     "files.associations": {
         "stm32f4xx_hal_def.h": "c",
@@ -31,8 +31,17 @@
         }
     ],
     "cortex-debug.armToolchainPath": "D:\\MSYS2\\ucrt64\\bin",
-    "cortex-debug.gdbPath.windows": "D:\\BaiduNetdiskDownload\\RM\\archive\\EC\\VSCode+Ozone鐜閰嶇疆\\gcc-arm-none-eabi-10.3-2021.10-win32\\Arm-GNU-Toolchian\\bin\\arm-none-eabi-gdb.exe",
+    "cortex-debug.gdbPath.windows": "D:\\BaiduNetdiskDownload\\RM\\archive\\EC\\VSCode+Ozone环境配置\\gcc-arm-none-eabi-10.3-2021.10-win32\\Arm-GNU-Toolchian\\bin\\arm-none-eabi-gdb.exe",
     "cortex-debug.openocdPath": "D:\\MSYS2\\mingw64\\bin\\openocd.exe",
-    "cortex-debug.JLinkGDBServerPath": "D:\\Jlink\\JLinkGDBServerCL.exe"
+    "cortex-debug.JLinkGDBServerPath": "D:\\Jlink\\JLinkGDBServerCL.exe",
+
+    "emberprobe.openocdPath": "D:\\MSYS2\\mingw64\\bin\\openocd.exe",
+    "emberprobe.gdbPath": "D:\\BaiduNetdiskDownload\\RM\\archive\\EC\\VSCode+Ozone环境配置\\gcc-arm-none-eabi-10.3-2021.10-win32\\Arm-GNU-Toolchian\\bin\\arm-none-eabi-gdb.exe",
+    "emberprobe.armToolchainPath": "D:\\BaiduNetdiskDownload\\RM\\archive\\EC\\VSCode+Ozone环境配置\\gcc-arm-none-eabi-10.3-2021.10-win32\\Arm-GNU-Toolchian\\bin",
+    "emberprobe.rtos": "FreeRTOS",
+    "emberprobe.transport": "swd",
+    "emberprobe.sampleFrequencyHz": 30,
+    "emberprobe.maxSamples": 2000
+
 }
 
