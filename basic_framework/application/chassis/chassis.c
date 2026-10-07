@@ -63,6 +63,10 @@ static float vt_lf, vt_rf, vt_lb, vt_rb;                  // 底盘速度解算�
 // 测试电机
 static DJIMotorInstance *motor_test;
 
+volatile float wave_ref = 0.0f;      // 目标速度
+volatile float wave_speed = 0.0f;    // 实际速度
+volatile float wave_current = 0.0f;  // 电流反馈原始值
+
 void ChassisInit()
 {
     // 四个轮子的参数一样,改tx_id和反转标志位即可
@@ -282,6 +286,13 @@ void ChassisTask()
 
     // ChassisTask() 末尾, EstimateSpeed() 之后
     DJIMotorSetRef(motor_test, 500);  // 单位是"度/秒"(角速度)
+
+    if (motor_test != NULL)
+    {
+        wave_ref = motor_test->motor_controller.pid_ref;
+        wave_speed = motor_test->measure.speed_aps;
+        wave_current = (float)motor_test->measure.real_current;
+    }
 
     // 200Hz任务,每2次发1包 → 100Hz波形帧
     static uint8_t vofa_cnt = 0;
