@@ -23,10 +23,6 @@
 #include "referee_UI.h"
 #include "arm_math.h"
 
-#include "bsp_usb.h"
-#include <string.h>
-#include "usart.h"   // 声明了 extern huart1
-
 /* 根据robot_def.h中的macro自动计算的参数 */
 #define HALF_WHEEL_BASE (WHEEL_BASE / 2.0f)     // 半轴距
 #define HALF_TRACK_WIDTH (TRACK_WIDTH / 2.0f)   // 半轮距
@@ -60,13 +56,6 @@ static DJIMotorInstance *motor_lf, *motor_rf, *motor_lb, *motor_rb; // left righ
 static float chassis_vx, chassis_vy;                      // 将云台系的速度投影到底盘
 static float vt_lf, vt_rf, vt_lb, vt_rb;                  // 底盘速度解算后的临时输出,待进行限幅
 
-// 测试电机
-static DJIMotorInstance *motor_test;
-
-volatile float wave_ref = 0.0f;      // 目标速度
-volatile float wave_speed = 0.0f;    // 实际速度
-volatile float wave_current = 0.0f;  // 电流反馈原始值
-
 void ChassisInit()
 {
     // 四个轮子的参数一样,改tx_id和反转标志位即可
@@ -93,23 +82,23 @@ void ChassisInit()
     };
     //  @todo: 当前还没有设置电机的正反转,仍然需要手动添加reference的正负号,需要电机module的支持,待修改.
     //使用功率控制的电机需要使用PowerControlInit()函数初始化,因为电机的控制方式不同
-    // chassis_motor_config.can_init_config.tx_id = 1;
-    // chassis_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_NORMAL;
-    // motor_lf = PowerControlInit(&chassis_motor_config);
+    chassis_motor_config.can_init_config.tx_id = 1;
+    chassis_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_NORMAL;
+    motor_lf = PowerControlInit(&chassis_motor_config);
 
-    // chassis_motor_config.can_init_config.tx_id = 2;
-    // chassis_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_NORMAL;
-    // motor_rf = PowerControlInit(&chassis_motor_config);
+    chassis_motor_config.can_init_config.tx_id = 2;
+    chassis_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_NORMAL;
+    motor_rf = PowerControlInit(&chassis_motor_config);
 
-    // chassis_motor_config.can_init_config.tx_id = 4;
-    // chassis_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_NORMAL;
-    // motor_lb = PowerControlInit(&chassis_motor_config);
+    chassis_motor_config.can_init_config.tx_id = 4;
+    chassis_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_NORMAL;
+    motor_lb = PowerControlInit(&chassis_motor_config);
 
-    // chassis_motor_config.can_init_config.tx_id = 3;
-    // chassis_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_NORMAL;
-    // motor_rb = PowerControlInit(&chassis_motor_config);
+    chassis_motor_config.can_init_config.tx_id = 3;
+    chassis_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_NORMAL;
+    motor_rb = PowerControlInit(&chassis_motor_config);
 
-    // referee_data = UITaskInit(&huart6, &ui_data); // 裁判系统初始化,会同时初始化UI
+    referee_data = UITaskInit(&huart6, &ui_data); // 裁判系统初始化,会同时初始化UI
 
 /* Buffer环暂未测试，逻辑是计算期望buffer与实际buffer的差值，转换为冗余的功率，todo：输入给功率控制部分，待完善 */
     PID_Init_Config_s Buffer_pid_conf = {
@@ -127,7 +116,7 @@ void ChassisInit()
             .tx_id = 0x302, // 超级电容默认接收id
             .rx_id = 0x301, // 超级电容默认发送id,注意tx和rx在其他人看来是反的
         }};
-    // cap = SuperCapInit(&cap_conf); // 超级电容初始化
+    cap = SuperCapInit(&cap_conf); // 超级电容初始化
 
     // 发布订阅初始化,如果为双板,则需要can comm来传递消息
 #ifdef CHASSIS_BOARD
@@ -149,33 +138,6 @@ void ChassisInit()
     chassis_sub = SubRegister("chassis_cmd", sizeof(Chassis_Ctrl_Cmd_s));
     chassis_pub = PubRegister("chassis_feed", sizeof(Chassis_Upload_Data_s));
 #endif // ONE_BOARD
-
-Motor_Init_Config_s motor_test_config = {
-    .can_init_config = {
-        .can_handle = &hcan1,   // 用CAN1
-        .tx_id = 1,             // 电调拨码ID(1~4走0x200帧,5~8走0x1FF帧)
-        // rx_id 不用填, MotorSenderGrouping() 会自动算成 0x201
-    },
-    .controller_param_init_config = {
-        .speed_PID = {
-            .Kp = 0.75f,
-            .Ki = 50,
-            .Kd = 0.016f,
-            .IntegralLimit = 3000,
-            .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
-            .MaxOut = 16000,       // C620电流指令上限16384
-        },
-    },
-    .controller_setting_init_config = {
-        .angle_feedback_source = MOTOR_FEED,
-        .speed_feedback_source = MOTOR_FEED,
-        .outer_loop_type = SPEED_LOOP,   // 只用速度环
-        .close_loop_type = SPEED_LOOP,
-    },
-    .motor_type = M3508,
-};
-motor_test = DJIMotorInit(&motor_test_config);
-
 }
 
 #define LF_CENTER ((HALF_TRACK_WIDTH + CENTER_GIMBAL_OFFSET_X + HALF_WHEEL_BASE - CENTER_GIMBAL_OFFSET_Y) * DEGREE_2_RAD)
@@ -198,18 +160,18 @@ static void MecanumCalculate()
  * @brief 根据裁判系统和电容剩余容量对输出进行限制并设置电机参考值
  *
  */
-// static void LimitChassisOutput()
-// {
-//     // 功率限制待添加
-//     // referee_data->PowerHeatData.chassis_power;
-//     // referee_data->PowerHeatData.chassis_power_buffer;
+static void LimitChassisOutput()
+{
+    // 功率限制待添加
+    // referee_data->PowerHeatData.chassis_power;
+    // referee_data->PowerHeatData.chassis_power_buffer;
 
-//     // 完成功率限制后进行电机参考输入设定
-//     DJIMotorSetRef(motor_lf, vt_lf);
-//     DJIMotorSetRef(motor_rf, vt_rf);
-//     DJIMotorSetRef(motor_lb, vt_lb);
-//     DJIMotorSetRef(motor_rb, vt_rb);
-// }
+    // 完成功率限制后进行电机参考输入设定
+    DJIMotorSetRef(motor_lf, vt_lf);
+    DJIMotorSetRef(motor_rf, vt_rf);
+    DJIMotorSetRef(motor_lb, vt_lb);
+    DJIMotorSetRef(motor_rb, vt_rb);
+}
 
 /**
  * @brief 根据每个轮子的速度反馈,计算底盘的实际运动速度,逆运动解算
@@ -235,21 +197,21 @@ void ChassisTask()
     chassis_cmd_recv = *(Chassis_Ctrl_Cmd_s *)CANCommGet(chasiss_can_comm);
 #endif // CHASSIS_BOARD
 
-    // SetPowerLimit(referee_data->GameRobotState.chassis_power_limit);//设置功率限制
-    // if (chassis_cmd_recv.chassis_mode == CHASSIS_ZERO_FORCE)
-    // { // 如果出现重要模块离线或遥控器设置为急停,让电机停止
-    //     DJIMotorStop(motor_lf);
-    //     DJIMotorStop(motor_rf);
-    //     DJIMotorStop(motor_lb);
-    //     DJIMotorStop(motor_rb);
-    // }
-    // else
-    // { // 正常工作
-    //     DJIMotorEnable(motor_lf);
-    //     DJIMotorEnable(motor_rf);
-    //     DJIMotorEnable(motor_lb);
-    //     DJIMotorEnable(motor_rb);
-    // }
+    SetPowerLimit(referee_data->GameRobotState.chassis_power_limit);//设置功率限制
+    if (chassis_cmd_recv.chassis_mode == CHASSIS_ZERO_FORCE)
+    { // 如果出现重要模块离线或遥控器设置为急停,让电机停止
+        DJIMotorStop(motor_lf);
+        DJIMotorStop(motor_rf);
+        DJIMotorStop(motor_lb);
+        DJIMotorStop(motor_rb);
+    }
+    else
+    { // 正常工作
+        DJIMotorEnable(motor_lf);
+        DJIMotorEnable(motor_rf);
+        DJIMotorEnable(motor_lb);
+        DJIMotorEnable(motor_rb);
+    }
 
     // 根据控制模式设定旋转速度
     switch (chassis_cmd_recv.chassis_mode)
@@ -279,37 +241,10 @@ void ChassisTask()
     MecanumCalculate();
 
     // 根据裁判系统的反馈数据和电容数据对输出限幅并设定闭环参考值
-    // LimitChassisOutput();
+    LimitChassisOutput();
 
     // 根据电机的反馈速度和IMU(如果有)计算真实速度
     EstimateSpeed();
-
-    // ChassisTask() 末尾, EstimateSpeed() 之后
-    DJIMotorSetRef(motor_test, 500);  // 单位是"度/秒"(角速度)
-
-    if (motor_test != NULL)
-    {
-        wave_ref = motor_test->motor_controller.pid_ref;
-        wave_speed = motor_test->measure.speed_aps;
-        wave_current = (float)motor_test->measure.real_current;
-    }
-
-    // 200Hz任务,每2次发1包 → 100Hz波形帧
-    static uint8_t vofa_cnt = 0;
-    if (motor_test != NULL && ++vofa_cnt >= 1)
-    {
-        vofa_cnt = 0;
-        static uint8_t frame[16]; // 必须static: DMA还在搬的时候函数已退出,缓冲区不能被回收
-        float ch[3] = {
-            500.0f,                                  // 通道0: 目标值
-            motor_test->measure.speed_aps,           // 通道1: 实际角速度
-            (float)motor_test->measure.real_current, // 通道2: 实际电流
-        };
-        memcpy(frame, ch, 12);
-        frame[12] = 0x00; frame[13] = 0x00; frame[14] = 0x80; frame[15] = 0x7F; // JustFloat帧尾
-        HAL_UART_Transmit_DMA(&huart1, frame, 16);
-    }
-
 
     // // 获取裁判系统数据   建议将裁判系统与底盘分离，所以此处数据应使用消息中心发送
     // // 我方颜色id小于7是红色,大于7是蓝色,注意这里发送的是对方的颜色, 0:blue , 1:red
