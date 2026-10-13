@@ -49,6 +49,14 @@ static Referee_Interactive_info_t ui_data; // UI数据，将底盘中的数据�
 static SuperCapInstance *cap;                                       // 超级电容
 static DJIMotorInstance *motor_lf, *motor_rf, *motor_lb, *motor_rb; // left right forward back
 
+/* ---- 调试观察用全局变量(非指针,供 EmberProbe 采样,不参与任何控制逻辑) ---- */
+volatile float dbg_lf_rpm, dbg_rf_rpm, dbg_lb_rpm, dbg_rb_rpm;  // 实测转速 rpm
+volatile float dbg_lf_ref, dbg_rf_ref, dbg_lb_ref, dbg_rb_ref;  // 设定转速 rpm
+volatile float dbg_lf_cur, dbg_rf_cur, dbg_lb_cur, dbg_rb_cur;  // 实测电流
+volatile float dbg_lf_ecd, dbg_rf_ecd, dbg_lb_ecd, dbg_rb_ecd;  // 单圈编码器
+volatile float dbg_lf_cnt, dbg_rf_cnt, dbg_lb_cnt, dbg_rb_cnt;  // 反馈帧计数
+volatile float dbg_lf_temp, dbg_rf_temp, dbg_lb_temp, dbg_rb_temp;  // 温度示例
+
 /* 用于自旋变速策略的时间变量 */
 // static float t;
 
@@ -63,8 +71,8 @@ void ChassisInit()
         .can_init_config.can_handle = &hcan1,
         .controller_param_init_config = {
             .speed_PID = {
-                .Kp = 4.5, // 4.5
-                .Ki = 0,   // 0
+                .Kp = 8.0f, // 8.0f
+                .Ki = 0.2f,   // 0.2f
                 .Kd = 0,   // 0
                 .IntegralLimit = 3000,
                 .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
@@ -83,7 +91,7 @@ void ChassisInit()
     //  @todo: 当前还没有设置电机的正反转,仍然需要手动添加reference的正负号,需要电机module的支持,待修改.
     //使用功率控制的电机需要使用PowerControlInit()函数初始化,因为电机的控制方式不同
     chassis_motor_config.can_init_config.tx_id = 1;
-    chassis_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_NORMAL;
+    chassis_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_REVERSE;
     motor_lf = PowerControlInit(&chassis_motor_config);
 
     chassis_motor_config.can_init_config.tx_id = 2;
@@ -95,7 +103,7 @@ void ChassisInit()
     motor_lb = PowerControlInit(&chassis_motor_config);
 
     chassis_motor_config.can_init_config.tx_id = 3;
-    chassis_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_NORMAL;
+    chassis_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_REVERSE;
     motor_rb = PowerControlInit(&chassis_motor_config);
 
     referee_data = UITaskInit(&huart6, &ui_data); // 裁判系统初始化,会同时初始化UI
@@ -150,10 +158,10 @@ void ChassisInit()
  */
 static void MecanumCalculate()
 {
-    vt_lf = -chassis_vx - chassis_vy - chassis_cmd_recv.wz * LF_CENTER;
+    vt_lf = -chassis_vx - chassis_vy + chassis_cmd_recv.wz * LF_CENTER;
     vt_rf = -chassis_vx + chassis_vy - chassis_cmd_recv.wz * RF_CENTER;
     vt_lb = chassis_vx - chassis_vy - chassis_cmd_recv.wz * LB_CENTER;
-    vt_rb = chassis_vx + chassis_vy - chassis_cmd_recv.wz * RB_CENTER;
+    vt_rb = chassis_vx + chassis_vy + chassis_cmd_recv.wz * RB_CENTER;
 }
 
 /**
@@ -191,13 +199,20 @@ void ChassisTask()
     // 后续增加没收到消息的处理(双板的情况)
     // 获取新的控制信息
 #ifdef ONE_BOARD
-    SubGetMessage(chassis_sub, &chassis_cmd_recv);
+    // SubGetMessage(chassis_sub, &chassis_cmd_recv);
 #endif
 #ifdef CHASSIS_BOARD
     chassis_cmd_recv = *(Chassis_Ctrl_Cmd_s *)CANCommGet(chasiss_can_comm);
 #endif // CHASSIS_BOARD
 
-    SetPowerLimit(referee_data->GameRobotState.chassis_power_limit);//设置功率限制
+        chassis_cmd_recv.chassis_mode = CHASSIS_NO_FOLLOW; // 使能电机
+        chassis_cmd_recv.offset_angle = 0;   // 调试:忽略云台夹角,命令即底盘坐标系
+        chassis_cmd_recv.vx = 0;           // 转子 rad/s,从小值试起
+        chassis_cmd_recv.vy = 600.0f;         // 转子 rad/s,从小值试起
+
+    // 台架调试:未接裁判系统时该值为0,功率缩放会把输出乘成0,临时固定为60W,接裁判系统后恢复原句
+    SetPowerLimit(60.0f);
+    // SetPowerLimit(referee_data->GameRobotState.chassis_power_limit);//设置功率限制
     if (chassis_cmd_recv.chassis_mode == CHASSIS_ZERO_FORCE)
     { // 如果出现重要模块离线或遥控器设置为急停,让电机停止
         DJIMotorStop(motor_lf);
@@ -229,6 +244,9 @@ void ChassisTask()
         break;
     }
 
+     /* --- 自旋测试:放在 switch 之后,避免被 NO_FOLLOW 分支清零 --- */
+    chassis_cmd_recv.wz = 0;         // 转子 rad/s,从小值试起
+
     // 根据云台和底盘的角度offset将控制量映射到底盘坐标系上
     // 底盘逆时针旋转为角度正方向;云台命令的方向以云台指向的方向为x,采用右手系(x指向正北时y在正东)
     static float sin_theta, cos_theta;
@@ -252,6 +270,37 @@ void ChassisTask()
     // // 当前只做了17mm热量的数据获取,后续根据robot_def中的宏切换双枪管和英雄42mm的情况
     // chassis_feedback_data.bullet_speed = referee_data->GameRobotState.shooter_id1_17mm_speed_limit;
     // chassis_feedback_data.rest_heat = referee_data->PowerHeatData.shooter_heat0;
+
+    /* ---- 调试镜像,只读电机状态,不改变任何控制量 ---- */
+    dbg_lf_rpm = motor_lf->measure.speed_aps / 6.0f;   // deg/s → rpm
+    dbg_rf_rpm = motor_rf->measure.speed_aps / 6.0f;
+    dbg_lb_rpm = motor_lb->measure.speed_aps / 6.0f;
+    dbg_rb_rpm = motor_rb->measure.speed_aps / 6.0f;
+
+    dbg_lf_ref = motor_lf->motor_controller.pid_ref;   // 设定值,单位本来就是 rpm
+    dbg_rf_ref = motor_rf->motor_controller.pid_ref;
+    dbg_lb_ref = motor_lb->motor_controller.pid_ref;
+    dbg_rb_ref = motor_rb->motor_controller.pid_ref;
+
+    dbg_lf_cur = (float)motor_lf->measure.real_current; // int16_t → float
+    dbg_rf_cur = (float)motor_rf->measure.real_current;
+    dbg_lb_cur = (float)motor_lb->measure.real_current;
+    dbg_rb_cur = (float)motor_rb->measure.real_current;
+
+    dbg_lf_ecd = (float)motor_lf->measure.ecd;
+    dbg_rf_ecd = (float)motor_rf->measure.ecd;
+    dbg_lb_ecd = (float)motor_lb->measure.ecd;
+    dbg_rb_ecd = (float)motor_rb->measure.ecd;
+
+    dbg_lf_cnt = (float)motor_lf->feed_cnt;            // 只涨说明反馈正常
+    dbg_rf_cnt = (float)motor_rf->feed_cnt;
+    dbg_lb_cnt = (float)motor_lb->feed_cnt;
+    dbg_rb_cnt = (float)motor_rb->feed_cnt;
+
+    dbg_lf_temp = (float)motor_lf->measure.temperature;
+    dbg_rf_temp = (float)motor_rf->measure.temperature;
+    dbg_lb_temp = (float)motor_lb->measure.temperature;
+    dbg_rb_temp = (float)motor_rb->measure.temperature;
 
     // 推送反馈消息
 #ifdef ONE_BOARD
