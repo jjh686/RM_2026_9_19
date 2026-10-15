@@ -199,19 +199,14 @@ void ChassisTask()
     // 后续增加没收到消息的处理(双板的情况)
     // 获取新的控制信息
 #ifdef ONE_BOARD
-    // SubGetMessage(chassis_sub, &chassis_cmd_recv);
+    SubGetMessage(chassis_sub, &chassis_cmd_recv);
 #endif
 #ifdef CHASSIS_BOARD
     chassis_cmd_recv = *(Chassis_Ctrl_Cmd_s *)CANCommGet(chasiss_can_comm);
 #endif // CHASSIS_BOARD
 
-        chassis_cmd_recv.chassis_mode = CHASSIS_NO_FOLLOW; // 使能电机
-        chassis_cmd_recv.offset_angle = 0;   // 调试:忽略云台夹角,命令即底盘坐标系
-        chassis_cmd_recv.vx = 0;           // 转子 rad/s,从小值试起
-        chassis_cmd_recv.vy = 600.0f;         // 转子 rad/s,从小值试起
-
     // 台架调试:未接裁判系统时该值为0,功率缩放会把输出乘成0,临时固定为60W,接裁判系统后恢复原句
-    SetPowerLimit(60.0f);
+    SetPowerLimit(120.0f);
     // SetPowerLimit(referee_data->GameRobotState.chassis_power_limit);//设置功率限制
     if (chassis_cmd_recv.chassis_mode == CHASSIS_ZERO_FORCE)
     { // 如果出现重要模块离线或遥控器设置为急停,让电机停止
@@ -237,15 +232,15 @@ void ChassisTask()
     case CHASSIS_FOLLOW_GIMBAL_YAW: // 跟随云台,不单独设置pid,以误差角度平方为速度输出
         chassis_cmd_recv.wz = -1.5f * chassis_cmd_recv.offset_angle * abs(chassis_cmd_recv.offset_angle);
         break;
-    case CHASSIS_ROTATE: // 自旋,同时保持全向机动;当前wz维持定值,后续增加不规则的变速策略
-        chassis_cmd_recv.wz = 4000;
+    case CHASSIS_ROTATE: // 自旋,幅值固定,方向来自命令符号
+        chassis_cmd_recv.wz = (chassis_cmd_recv.wz < 0.0f) ? -100.0f : 100.0f;
         break;
     default:
         break;
     }
 
-     /* --- 自旋测试:放在 switch 之后,避免被 NO_FOLLOW 分支清零 --- */
-    chassis_cmd_recv.wz = 0;         // 转子 rad/s,从小值试起
+    /* 无云台阶段:忽略云台夹角(云台未接入时 CalcOffsetAngle 会算出假值) */
+    chassis_cmd_recv.offset_angle = 0;
 
     // 根据云台和底盘的角度offset将控制量映射到底盘坐标系上
     // 底盘逆时针旋转为角度正方向;云台命令的方向以云台指向的方向为x,采用右手系(x指向正北时y在正东)

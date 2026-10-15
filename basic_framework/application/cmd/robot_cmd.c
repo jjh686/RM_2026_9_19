@@ -30,7 +30,9 @@ static Subscriber_t *chassis_feed_sub; // 底盘反馈信息订阅者
 static Chassis_Ctrl_Cmd_s chassis_cmd_send;      // 发送给底盘应用的信息,包括控制信息和UI绘制相关
 static Chassis_Upload_Data_s chassis_fetch_data; // 从底盘应用接收的反馈信息信息,底盘功率枪口热量与底盘运动状态等
 
-static RC_ctrl_t *rc_data;              // 遥控器数据,初始化时返回
+static FS_RC_ctrl_t *fs_rc_data;        // SBUS 原始数据,初始化时返回
+static RC_ctrl_t rc_compat[2];          // 适配成 DBUS 语义的数据[TEMP/LAST]
+static int8_t spin_dir = 1;             // +1 逆时针 / -1 顺时针, 由 SA(CH6) 决定
 static Vision_Recv_s *vision_recv_data; // 视觉接收数据指针,初始化时返回
 // static Vision_Send_s vision_send_data;  // 视觉发送数据
 
@@ -48,6 +50,27 @@ static Robot_Status_e robot_state; // 机器人整体工作状态
 
 BMI088Instance *bmi088_test; // 云台IMU
 BMI088_Data_t bmi088_data;
+
+/* SBUS → DBUS 语义适配,让下方原有逻辑无需改动 */
+static void FS2RC_Adapt(void)
+{
+    rc_compat[LAST] = rc_compat[TEMP];          /* 保留上一帧,供开关/按键边沿判断 */
+
+    rc_compat[TEMP].rc.rocker_r_ = fs_rc_data[TEMP].rc.rocker_r_;   /* CH1 → vx */
+    rc_compat[TEMP].rc.rocker_r1 = fs_rc_data[TEMP].rc.rocker_r1;   /* CH2 → vy */
+    rc_compat[TEMP].rc.rocker_l_ = fs_rc_data[TEMP].rc.rocker_l_;   /* CH4 备用 */
+    rc_compat[TEMP].rc.rocker_l1 = fs_rc_data[TEMP].rc.rocker_l1;   /* CH3 备用 */
+
+    /* SBUS 开关:0上/1中/2下  →  框架:UP=1/MID=3/DOWN=2 */
+    static const uint8_t sw_map[3] = { RC_SW_UP, RC_SW_MID, RC_SW_DOWN };   /* {1, 3, 2} */
+    rc_compat[TEMP].rc.switch_right = sw_map[fs_rc_data[TEMP].channel[6]];  /* CH7 */
+    rc_compat[TEMP].rc.switch_left  = sw_map[fs_rc_data[TEMP].channel[7]];  /* CH8 */
+
+    rc_compat[TEMP].rc.dial = fs_rc_data[TEMP].rc.knob_l;                  /* CH5 → 急停 */
+    /* SA(两档,CH6) → 小陀螺方向:上档≈0 → 逆时针; 下档≈1567 → 顺时针 */
+    spin_dir = (fs_rc_data[TEMP].rc.knob_r > 700) ? -1 : 1;
+}
+
 void RobotCMDInit()
 {
     // BMI088_Init_Config_s bmi088_config = {
@@ -91,7 +114,7 @@ void RobotCMDInit()
     //     },
     // };
     //bmi088_test = BMI088Register(&bmi088_config);
-   rc_data = RemoteControlInit(&huart3);   // 修改为对应串口,注意如果是自研板dbus协议串口需选用添加了反相器的那个
+   fs_rc_data = FS_RemoteControlInit(&huart3);   // 改成:W.BUS/SBUS
     vision_recv_data = VisionInit(&huart1); // 视觉通信串口
 
     gimbal_cmd_pub = PubRegister("gimbal_cmd", sizeof(Gimbal_Ctrl_Cmd_s));
@@ -154,48 +177,49 @@ static void CalcOffsetAngle()
 static void RemoteControlSet()
 {
     // 控制底盘和云台运行模式,云台待添加,云台是否始终使用IMU数据?
-    if (switch_is_down(rc_data[TEMP].rc.switch_right)) // 右侧开关状态[下],底盘跟随云台
+    if (switch_is_down(rc_compat[TEMP].rc.switch_right)) // 右侧开关状态[下],底盘跟随云台
     {
         chassis_cmd_send.chassis_mode = CHASSIS_ROTATE;
+        chassis_cmd_send.wz = (float)spin_dir;           // ← 新增这一行:传方向(+1/-1)
         gimbal_cmd_send.gimbal_mode = GIMBAL_GYRO_MODE;
     }
-    else if (switch_is_mid(rc_data[TEMP].rc.switch_right)) // 右侧开关状态[中],底盘和云台分离,底盘保持不转动
+    else if (switch_is_mid(rc_compat[TEMP].rc.switch_right)) // 右侧开关状态[中],底盘和云台分离,底盘保持不转动
     {
         chassis_cmd_send.chassis_mode = CHASSIS_NO_FOLLOW;
         gimbal_cmd_send.gimbal_mode = GIMBAL_FREE_MODE;
     }
 
     // 云台参数,确定云台控制数据
-    if (switch_is_mid(rc_data[TEMP].rc.switch_left)) // 左侧开关状态为[中],视觉模式
+    if (switch_is_mid(rc_compat[TEMP].rc.switch_left)) // 左侧开关状态为[中],视觉模式
     {
         // 待添加,视觉会发来和目标的误差,同样将其转化为total angle的增量进行控制
         // ...
     }
     // 左侧开关状态为[下],或视觉未识别到目标,纯遥控器拨杆控制
-    if (switch_is_down(rc_data[TEMP].rc.switch_left) || vision_recv_data->target_state == NO_TARGET)
+    if (switch_is_down(rc_compat[TEMP].rc.switch_left) || vision_recv_data->target_state == NO_TARGET)
     { // 按照摇杆的输出大小进行角度增量,增益系数需调整
-        gimbal_cmd_send.yaw += 0.005f * (float)rc_data[TEMP].rc.rocker_l_;
-        gimbal_cmd_send.pitch += 0.001f * (float)rc_data[TEMP].rc.rocker_l1;
+        gimbal_cmd_send.yaw += 0.005f * (float)rc_compat[TEMP].rc.rocker_l_;
+        gimbal_cmd_send.pitch += 0.001f * (float)rc_compat[TEMP].rc.rocker_l1;
     }
     // 云台软件限位
 
     // 底盘参数,目前没有加入小陀螺(调试似乎暂时没有必要),系数需要调整
-    chassis_cmd_send.vx = 10.0f * (float)rc_data[TEMP].rc.rocker_r_; // _水平方向
-    chassis_cmd_send.vy = 10.0f * (float)rc_data[TEMP].rc.rocker_r1; // 1数值方向
+    chassis_cmd_send.vy = 1.6f * (float)rc_compat[TEMP].rc.rocker_r_; // _水平方向
+    chassis_cmd_send.vx = 1.6f * (float)rc_compat[TEMP].rc.rocker_r1; // 1数值方向
 
     // 发射参数
-    if (switch_is_up(rc_data[TEMP].rc.switch_right)) // 右侧开关状态[上],弹舱打开
+    if (switch_is_up(rc_compat[TEMP].rc.switch_right)) // 右侧开关状态[上],弹舱打开
         ;                                            // 弹舱舵机控制,待添加servo_motor模块,开启
     else
         ; // 弹舱舵机控制,待添加servo_motor模块,关闭
 
     // 摩擦轮控制,拨轮向上打为负,向下为正
-    if (rc_data[TEMP].rc.dial < -100) // 向上超过100,打开摩擦轮
+    if (rc_compat[TEMP].rc.dial < -100) // 向上超过100,打开摩擦轮
         shoot_cmd_send.friction_mode = FRICTION_ON;
     else
         shoot_cmd_send.friction_mode = FRICTION_OFF;
     // 拨弹控制,遥控器固定为一种拨弹模式,可自行选择
-    if (rc_data[TEMP].rc.dial < -500)
+    if (rc_compat[TEMP].rc.dial < -500)
         shoot_cmd_send.load_mode = LOAD_BURSTFIRE;
     else
         shoot_cmd_send.load_mode = LOAD_STOP;
@@ -209,13 +233,13 @@ static void RemoteControlSet()
  */
 static void MouseKeySet()
 {
-    chassis_cmd_send.vx = rc_data[TEMP].key[KEY_PRESS].w * 300 - rc_data[TEMP].key[KEY_PRESS].s * 300; // 系数待测
-    chassis_cmd_send.vy = rc_data[TEMP].key[KEY_PRESS].s * 300 - rc_data[TEMP].key[KEY_PRESS].d * 300;
+    chassis_cmd_send.vx = rc_compat[TEMP].key[KEY_PRESS].w * 300 - rc_compat[TEMP].key[KEY_PRESS].s * 300; // 系数待测
+    chassis_cmd_send.vy = rc_compat[TEMP].key[KEY_PRESS].s * 300 - rc_compat[TEMP].key[KEY_PRESS].d * 300;
 
-    gimbal_cmd_send.yaw += (float)rc_data[TEMP].mouse.x / 660 * 10; // 系数待测
-    gimbal_cmd_send.pitch += (float)rc_data[TEMP].mouse.y / 660 * 10;
+    gimbal_cmd_send.yaw += (float)rc_compat[TEMP].mouse.x / 660 * 10; // 系数待测
+    gimbal_cmd_send.pitch += (float)rc_compat[TEMP].mouse.y / 660 * 10;
 
-    switch (rc_data[TEMP].key_count[KEY_PRESS][Key_Z] % 3) // Z键设置弹速
+    switch (rc_compat[TEMP].key_count[KEY_PRESS][Key_Z] % 3) // Z键设置弹速
     {
     case 0:
         shoot_cmd_send.bullet_speed = 15;
@@ -227,7 +251,7 @@ static void MouseKeySet()
         shoot_cmd_send.bullet_speed = 30;
         break;
     }
-    switch (rc_data[TEMP].key_count[KEY_PRESS][Key_E] % 4) // E键设置发射模式
+    switch (rc_compat[TEMP].key_count[KEY_PRESS][Key_E] % 4) // E键设置发射模式
     {
     case 0:
         shoot_cmd_send.load_mode = LOAD_STOP;
@@ -242,7 +266,7 @@ static void MouseKeySet()
         shoot_cmd_send.load_mode = LOAD_BURSTFIRE;
         break;
     }
-    switch (rc_data[TEMP].key_count[KEY_PRESS][Key_R] % 2) // R键开关弹舱
+    switch (rc_compat[TEMP].key_count[KEY_PRESS][Key_R] % 2) // R键开关弹舱
     {
     case 0:
         shoot_cmd_send.lid_mode = LID_OPEN;
@@ -251,7 +275,7 @@ static void MouseKeySet()
         shoot_cmd_send.lid_mode = LID_CLOSE;
         break;
     }
-    switch (rc_data[TEMP].key_count[KEY_PRESS][Key_F] % 2) // F键开关摩擦轮
+    switch (rc_compat[TEMP].key_count[KEY_PRESS][Key_F] % 2) // F键开关摩擦轮
     {
     case 0:
         shoot_cmd_send.friction_mode = FRICTION_OFF;
@@ -260,7 +284,7 @@ static void MouseKeySet()
         shoot_cmd_send.friction_mode = FRICTION_ON;
         break;
     }
-    switch (rc_data[TEMP].key_count[KEY_PRESS][Key_C] % 4) // C键设置底盘速度
+    switch (rc_compat[TEMP].key_count[KEY_PRESS][Key_C] % 4) // C键设置底盘速度
     {
     case 0:
         chassis_cmd_send.chassis_speed_buff = 40;
@@ -275,7 +299,7 @@ static void MouseKeySet()
         chassis_cmd_send.chassis_speed_buff = 100;
         break;
     }
-    switch (rc_data[TEMP].key[KEY_PRESS].shift) // 待添加 按shift允许超功率 消耗缓冲能量
+    switch (rc_compat[TEMP].key[KEY_PRESS].shift) // 待添加 按shift允许超功率 消耗缓冲能量
     {
     case 1:
 
@@ -297,7 +321,7 @@ static void MouseKeySet()
 static void EmergencyHandler()
 {
     // 拨轮的向下拨超过一半进入急停模式.注意向打时下拨轮是正
-    if (rc_data[TEMP].rc.dial > 300 || robot_state == ROBOT_STOP) // 还需添加重要应用和模块离线的判断
+    if (rc_compat[TEMP].rc.dial > 300 || robot_state == ROBOT_STOP) // 还需添加重要应用和模块离线的判断
     {
         robot_state = ROBOT_STOP;
         gimbal_cmd_send.gimbal_mode = GIMBAL_ZERO_FORCE;
@@ -308,7 +332,7 @@ static void EmergencyHandler()
         LOGERROR("[CMD] emergency stop!");
     }
     // 遥控器右侧开关为[上],恢复正常运行
-    if (switch_is_up(rc_data[TEMP].rc.switch_right))
+    if (switch_is_up(rc_compat[TEMP].rc.switch_right))
     {
         robot_state = ROBOT_READY;
         shoot_cmd_send.shoot_mode = SHOOT_ON;
@@ -319,6 +343,7 @@ static void EmergencyHandler()
 /* 机器人核心控制任务,200Hz频率运行(必须高于视觉发送频率) */
 void RobotCMDTask()
 {
+    FS2RC_Adapt(); // SBUS → DBUS 语义适配
    // BMI088Acquire(bmi088_test,&bmi088_data) ;
     // 从其他应用获取回传数据
 #ifdef ONE_BOARD
@@ -333,9 +358,9 @@ void RobotCMDTask()
     // 根据gimbal的反馈值计算云台和底盘正方向的夹角,不需要传参,通过static私有变量完成
     CalcOffsetAngle();
     // 根据遥控器左侧开关,确定当前使用的控制模式为遥控器调试还是键鼠
-    if (switch_is_down(rc_data[TEMP].rc.switch_left)) // 遥控器左侧开关状态为[下],遥控器控制
+    if (switch_is_down(rc_compat[TEMP].rc.switch_left)) // 遥控器左侧开关状态为[下],遥控器控制
         RemoteControlSet();
-    else if (switch_is_up(rc_data[TEMP].rc.switch_left)) // 遥控器左侧开关状态为[上],键盘控制
+    else if (switch_is_up(rc_compat[TEMP].rc.switch_left)) // 遥控器左侧开关状态为[上],键盘控制
         MouseKeySet();
 
     EmergencyHandler(); // 处理模块离线和遥控器急停等紧急情况
