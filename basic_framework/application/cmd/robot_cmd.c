@@ -69,6 +69,12 @@ static void FS2RC_Adapt(void)
     rc_compat[TEMP].rc.dial = fs_rc_data[TEMP].rc.knob_l;                  /* CH5 → 急停 */
     /* SA(两档,CH6) → 小陀螺方向:上档≈0 → 逆时针; 下档≈1567 → 顺时针 */
     spin_dir = (fs_rc_data[TEMP].rc.knob_r > 700) ? -1 : 1;
+
+    if (abs(rc_compat[TEMP].rc.rocker_l_) < 20) rc_compat[TEMP].rc.rocker_l_ = 0;
+    if (abs(rc_compat[TEMP].rc.rocker_l1) < 20) rc_compat[TEMP].rc.rocker_l1 = 0;
+    if (abs(rc_compat[TEMP].rc.rocker_r_) < 20) rc_compat[TEMP].rc.rocker_r_ = 0;
+    if (abs(rc_compat[TEMP].rc.rocker_r1) < 20) rc_compat[TEMP].rc.rocker_r1 = 0;
+
 }
 
 void RobotCMDInit()
@@ -198,10 +204,15 @@ static void RemoteControlSet()
     // 左侧开关状态为[下],或视觉未识别到目标,纯遥控器拨杆控制
     if (switch_is_down(rc_compat[TEMP].rc.switch_left) || vision_recv_data->target_state == NO_TARGET)
     { // 按照摇杆的输出大小进行角度增量,增益系数需调整
-        gimbal_cmd_send.yaw += 0.005f * (float)rc_compat[TEMP].rc.rocker_l_;
-        gimbal_cmd_send.pitch += 0.001f * (float)rc_compat[TEMP].rc.rocker_l1;
+        gimbal_cmd_send.yaw += 0.0007f * (float)rc_compat[TEMP].rc.rocker_l_;
+        gimbal_cmd_send.pitch += 0.0003f * (float)rc_compat[TEMP].rc.rocker_l1;
     }
     // 云台软件限位
+
+    if (gimbal_cmd_send.pitch > PITCH_MAX_ANGLE) gimbal_cmd_send.pitch = PITCH_MAX_ANGLE;
+    if (gimbal_cmd_send.pitch < PITCH_MIN_ANGLE) gimbal_cmd_send.pitch = PITCH_MIN_ANGLE;
+    if (gimbal_cmd_send.yaw > YAW_MAX_ANGLE) gimbal_cmd_send.yaw = YAW_MAX_ANGLE;
+    if (gimbal_cmd_send.yaw < YAW_MIN_ANGLE) gimbal_cmd_send.yaw = YAW_MIN_ANGLE;
 
     // 底盘参数,目前没有加入小陀螺(调试似乎暂时没有必要),系数需要调整
     chassis_cmd_send.vy = 1.6f * (float)rc_compat[TEMP].rc.rocker_r_; // _水平方向
@@ -321,7 +332,7 @@ static void MouseKeySet()
 static void EmergencyHandler()
 {
     // 拨轮的向下拨超过一半进入急停模式.注意向打时下拨轮是正
-    if (rc_compat[TEMP].rc.dial > 300 || robot_state == ROBOT_STOP) // 还需添加重要应用和模块离线的判断
+    if (rc_compat[TEMP].rc.dial > 500 || robot_state == ROBOT_STOP) // 还需添加重要应用和模块离线的判断
     {
         robot_state = ROBOT_STOP;
         gimbal_cmd_send.gimbal_mode = GIMBAL_ZERO_FORCE;
