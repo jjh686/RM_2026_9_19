@@ -140,6 +140,7 @@ void ChassisInit()
 #endif // ONE_BOARD
 }
 
+#if defined(CHASSIS_MECANUM)
 #define LF_CENTER ((HALF_TRACK_WIDTH + CENTER_GIMBAL_OFFSET_X + HALF_WHEEL_BASE - CENTER_GIMBAL_OFFSET_Y) * DEGREE_2_RAD)
 #define RF_CENTER ((HALF_TRACK_WIDTH - CENTER_GIMBAL_OFFSET_X + HALF_WHEEL_BASE - CENTER_GIMBAL_OFFSET_Y) * DEGREE_2_RAD)
 #define LB_CENTER ((HALF_TRACK_WIDTH + CENTER_GIMBAL_OFFSET_X + HALF_WHEEL_BASE + CENTER_GIMBAL_OFFSET_Y) * DEGREE_2_RAD)
@@ -155,6 +156,35 @@ static void MecanumCalculate()
     vt_lb = chassis_vx - chassis_vy - chassis_cmd_recv.wz * LB_CENTER;
     vt_rb = chassis_vx + chassis_vy - chassis_cmd_recv.wz * RB_CENTER;
 }
+
+#else /* ---------------- CHASSIS_OMNI: 四轮X型全向轮 ---------------- */
+
+/* 轮轴指向底盘中心, 驱动方向为切向
+ * a=半轴距 b=半轮距 r0=轮心到旋转中心距离
+ * 350/300 时: OMNI_KX=0.6508  OMNI_KY=0.7593  OMNI_KW=4.023
+ */
+#define OMNI_A  (WHEEL_BASE / 2.0f)
+#define OMNI_B  (TRACK_WIDTH / 2.0f)
+#define OMNI_R0 (sqrtf(OMNI_A * OMNI_A + OMNI_B * OMNI_B))
+#define OMNI_KX (OMNI_B / OMNI_R0)
+#define OMNI_KY (OMNI_A / OMNI_R0)
+#define OMNI_KW (OMNI_R0 * DEGREE_2_RAD)
+
+/**
+ * @brief 四轮X型全向轮正运动学
+ *        期望: vx>0 → [+ - + -] ; vy>0 → [+ + - -] ; wz>0 → [+ + + +]
+ */
+static void OmniCalculate()
+{
+    const float w = chassis_cmd_recv.wz * OMNI_KW;
+
+    vt_lf =  OMNI_KX * chassis_vx + OMNI_KY * chassis_vy + w;
+    vt_rf = -OMNI_KX * chassis_vx + OMNI_KY * chassis_vy + w;
+    vt_lb =  OMNI_KX * chassis_vx - OMNI_KY * chassis_vy + w;
+    vt_rb = -OMNI_KX * chassis_vx - OMNI_KY * chassis_vy + w;
+}
+
+#endif /* CHASSIS_OMNI */
 
 /**
  * @brief 根据裁判系统和电容剩余容量对输出进行限制并设置电机参考值
@@ -180,9 +210,29 @@ static void LimitChassisOutput()
  */
 static void EstimateSpeed()
 {
-    // 根据电机速度和陀螺仪的角速度进行解算,还可以利用加速度计判断是否打滑(如果有)
-    // chassis_feedback_data.vx vy wz =
-    //  ...
+#if defined(CHASSIS_OMNI)
+    const float lf = motor_lf->measure.speed_aps;
+    const float rf = motor_rf->measure.speed_aps;
+    const float lb = motor_lb->measure.speed_aps;
+    const float rb = motor_rb->measure.speed_aps;
+
+    /* 与 OmniCalculate 严格对应的伪逆 (单位: 转子 aps) */
+    const float vx_aps = ( lf - rf + lb - rb) * (1.0f / (4.0f * OMNI_KX));
+    const float vy_aps = ( lf + rf - lb - rb) * (1.0f / (4.0f * OMNI_KY));
+    const float wz_aps = ( lf + rf + lb + rb) * (1.0f / (4.0f * OMNI_KW));
+
+    /* aps → m/s: /6→rpm转子, /减速比→rpm轮, ×2πR/60→m/s */
+    const float aps_2_mps = PI2 * (RADIUS_WHEEL / 1000.0f) /
+                            (RPM_2_ANGLE_PER_SEC * REDUCTION_RATIO_WHEEL * 60.0f);
+
+    chassis_feedback_data.real_vx = vx_aps * aps_2_mps;
+    chassis_feedback_data.real_vy = vy_aps * aps_2_mps;
+    /* wz 不能复用伪单位 wz_aps, 直接用平均轮速换算: ω = v_wheel / r0 */
+    chassis_feedback_data.real_wz = (lf + rf + lb + rb) * 0.25f * aps_2_mps /
+                                    (OMNI_R0 / 1000.0f) * RAD_2_DEGREE;
+#else
+    // 麦轮逆解待补
+#endif
 }
 
 /* 机器人底盘控制核心任务 */
@@ -197,7 +247,19 @@ void ChassisTask()
     chassis_cmd_recv = *(Chassis_Ctrl_Cmd_s *)CANCommGet(chasiss_can_comm);
 #endif // CHASSIS_BOARD
 
-    SetPowerLimit(referee_data->GameRobotState.chassis_power_limit);//设置功率限制
+#if defined(CHASSIS_TEST_FORWARD)
+    // 台架测试: 强制固定速度前进, 覆盖遥控器/离线保护的命令
+    chassis_cmd_recv.vx = 0;
+    chassis_cmd_recv.vy = 0;
+    chassis_cmd_recv.wz = 0;
+    chassis_cmd_recv.offset_angle = 0;
+    chassis_cmd_recv.chassis_mode = CHASSIS_NO_FOLLOW; // 避免落到 ZERO_FORCE 分支停电机
+#endif
+
+    // 未接裁判系统时 chassis_power_limit 为 0,会把功率缩放成 0 导致底盘不动
+    float power_limit = referee_data->GameRobotState.chassis_power_limit;
+    SetPowerLimit(power_limit > 1.0f ? power_limit : 60.0f);
+
     if (chassis_cmd_recv.chassis_mode == CHASSIS_ZERO_FORCE)
     { // 如果出现重要模块离线或遥控器设置为急停,让电机停止
         DJIMotorStop(motor_lf);
@@ -222,8 +284,8 @@ void ChassisTask()
     case CHASSIS_FOLLOW_GIMBAL_YAW: // 跟随云台,不单独设置pid,以误差角度平方为速度输出
         chassis_cmd_recv.wz = -1.5f * chassis_cmd_recv.offset_angle * abs(chassis_cmd_recv.offset_angle);
         break;
-    case CHASSIS_ROTATE: // 自旋,同时保持全向机动;当前wz维持定值,后续增加不规则的变速策略
-        chassis_cmd_recv.wz = 4000;
+    case CHASSIS_ROTATE: // 自旋, 幅值固定, 方向来自命令符号
+        chassis_cmd_recv.wz = (chassis_cmd_recv.wz < 0.0f) ? -200.0f : 200.0f;
         break;
     default:
         break;
@@ -238,7 +300,11 @@ void ChassisTask()
     chassis_vy = chassis_cmd_recv.vx * sin_theta + chassis_cmd_recv.vy * cos_theta;
 
     // 根据控制模式进行正运动学解算,计算底盘输出
-    MecanumCalculate();
+    #if defined(CHASSIS_OMNI)
+        OmniCalculate();
+    #else
+        MecanumCalculate();
+    #endif
 
     // 根据裁判系统的反馈数据和电容数据对输出限幅并设定闭环参考值
     LimitChassisOutput();

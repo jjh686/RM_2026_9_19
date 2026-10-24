@@ -43,6 +43,17 @@
 #define RADIUS_WHEEL 60             // 轮子半径
 #define REDUCTION_RATIO_WHEEL 19.0f // 电机减速比,因为编码器量测的是转子的速度而不是输出轴的速度故需进行转换
 
+/* 底盘轮系类型: 只能选择一种 */
+// #define CHASSIS_MECANUM
+#define CHASSIS_OMNI
+
+/* 调试: 云台未接入时关闭底盘-云台角度映射,否则 offset_angle 恒为 -119.1° */
+#define CHASSIS_DEBUG_NO_GIMBAL
+
+#if defined(CHASSIS_MECANUM) && defined(CHASSIS_OMNI)
+#error "Only one chassis type can be defined!"
+#endif
+
 #define GYRO2GIMBAL_DIR_YAW 1   // 陀螺仪数据相较于云台的yaw的方向,1为相同,-1为相反
 #define GYRO2GIMBAL_DIR_PITCH 1 // 陀螺仪数据相较于云台的pitch的方向,1为相同,-1为相反
 #define GYRO2GIMBAL_DIR_ROLL 1  // 陀螺仪数据相较于云台的roll的方向,1为相同,-1为相反
@@ -183,9 +194,10 @@ typedef struct
     // attitude_t chassis_imu_data;
 #endif
     // 后续增加底盘的真实速度
-    // float real_vx;
-    // float real_vy;
-    // float real_wz;
+    float real_vx;
+    float real_vy;
+    float real_wz;
+
 
     uint8_t rest_heat;           // 剩余枪口热量
     Bullet_Speed_e bullet_speed; // 弹速限制
