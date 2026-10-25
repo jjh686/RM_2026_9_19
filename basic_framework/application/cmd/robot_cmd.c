@@ -331,23 +331,47 @@ static void MouseKeySet()
  */
 static void EmergencyHandler()
 {
-    // 拨轮的向下拨超过一半进入急停模式.注意向打时下拨轮是正
-    if (rc_compat[TEMP].rc.dial > 500 || robot_state == ROBOT_STOP) // 还需添加重要应用和模块离线的判断
+    /* 急停触发:旋钮拧到最左(dial > 1200)才认定,且连续 3 次(≈15ms)确认,防 SBUS 抖动 */
+    static uint8_t estop_cnt    = 0;   /* 连续计数 */
+    static uint8_t estop_logged = 0;   /* 只在进入急停时打一次日志,避免刷屏 */
+
+    if (rc_compat[TEMP].rc.dial > 800)
+    {
+        if (estop_cnt < 5) estop_cnt++;     /* 封顶,避免溢出 */
+    }
+    else
+    {
+        estop_cnt = 0;                      /* 一旦低于阈值就清零 */
+    }
+
+    if (estop_cnt >= 5 || robot_state == ROBOT_STOP)   /* 自锁条件保留 */
     {
         robot_state = ROBOT_STOP;
-        gimbal_cmd_send.gimbal_mode = GIMBAL_ZERO_FORCE;
+        gimbal_cmd_send.gimbal_mode   = GIMBAL_ZERO_FORCE;
         chassis_cmd_send.chassis_mode = CHASSIS_ZERO_FORCE;
-        shoot_cmd_send.shoot_mode = SHOOT_OFF;
-        shoot_cmd_send.friction_mode = FRICTION_OFF;
-        shoot_cmd_send.load_mode = LOAD_STOP;
-        LOGERROR("[CMD] emergency stop!");
+        shoot_cmd_send.shoot_mode     = SHOOT_OFF;
+        shoot_cmd_send.friction_mode  = FRICTION_OFF;
+        shoot_cmd_send.load_mode      = LOAD_STOP;
+
+        if (!estop_logged)                 /* ← 只在"刚进入急停"时报一次 */
+        {
+            LOGERROR("[CMD] emergency stop!");
+            estop_logged = 1;
+        }
     }
-    // 遥控器右侧开关为[上],恢复正常运行
+
+    /* 恢复:SB 拨上档 */
     if (switch_is_up(rc_compat[TEMP].rc.switch_right))
     {
         robot_state = ROBOT_READY;
         shoot_cmd_send.shoot_mode = SHOOT_ON;
-        LOGINFO("[CMD] reinstate, robot ready");
+
+        estop_cnt = 0;                     /* ← 恢复时把计数也清掉 */
+        if (estop_logged)                  /* ← 只在恢复那一次报 */
+        {
+            LOGINFO("[CMD] reinstate, robot ready");
+            estop_logged = 0;
+        }
     }
 }
 

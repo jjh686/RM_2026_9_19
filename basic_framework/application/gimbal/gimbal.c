@@ -37,19 +37,20 @@ void GimbalInit()
         },
         .controller_param_init_config = {
             .angle_PID = {
-                .Kp = 8, 
-                .Ki = 0.2f, 
+                .Kp = 300,       // 8 → 300（现在输出直接是电压指令，单位变了）
+                .Ki = 0,         // 0.2 / 0.05 → 0（单环不要积分，避免饱和）
                 .Kd = 0,
-                .DeadBand = 0.15f, 
+                .DeadBand = 1.0, 
                 .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
                 .IntegralLimit = 100,
 
-                .MaxOut = 300,
+                .MaxOut = 3000,     // 300 → 3000（≈2.4V 上限）
             },
             .speed_PID = {
-                .Kp = 80,  // 80
-                .Ki = 0, // 0
+                .Kp = 12,  
+                .Ki = 0, 
                 .Kd = 0,
+                .DeadBand = 100,     // ← 新增:速度死区,忽略编码器测速噪声
                 .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
                 .IntegralLimit = 3000,
                 .MaxOut = 2000,
@@ -61,9 +62,9 @@ void GimbalInit()
         },
         .controller_setting_init_config = {
             .angle_feedback_source = MOTOR_FEED,
-            .speed_feedback_source = OTHER_FEED,
+            .speed_feedback_source = MOTOR_FEED,
             .outer_loop_type = ANGLE_LOOP,
-            .close_loop_type = ANGLE_LOOP | SPEED_LOOP,
+            .close_loop_type = ANGLE_LOOP,      // ← 去掉 SPEED_LOOP（关键）
             .motor_reverse_flag = MOTOR_DIRECTION_NORMAL,
         },
         .motor_type = GM6020};
@@ -75,22 +76,23 @@ void GimbalInit()
         },
         .controller_param_init_config = {
             .angle_PID = {
-                .Kp = 8, 
-                .Ki = 0.05f, 
+                .Kp = 300,       // 8 → 300（现在输出直接是电压指令，单位变了）
+                .Ki = 0,         // 0.2 / 0.05 → 0（单环不要积分，避免饱和）
                 .Kd = 0,
                 .DeadBand = 1.0,
                 .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
                 .IntegralLimit = 100,
-                .MaxOut = 300,
+                .MaxOut = 3000,     // 300 → 3000（≈2.4V 上限）
             },
             .speed_PID = {
-                .Kp = 80,  // 40
-                .Ki = 0, // 0
-                .Kd = 0,   // 0
+                .Kp = 12,  
+                .Ki = 0, 
+                .Kd = 0,   
+                .DeadBand = 100,     // ← 新增
                 .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
                 .IntegralLimit = 2500,
                 .MaxOut = 2000,
-                .Output_LPF_RC = 0.3,  // ← 新增
+                .Output_LPF_RC = 0.5,  // ← 新增
             },
             .other_angle_feedback_ptr = &gimba_IMU_data->Roll,
             // 还需要增加角速度额外反馈指针,注意方向,ins_task.md中有c板的bodyframe坐标系说明
@@ -98,9 +100,9 @@ void GimbalInit()
         },
         .controller_setting_init_config = {
             .angle_feedback_source = MOTOR_FEED,
-            .speed_feedback_source = OTHER_FEED,
+            .speed_feedback_source = MOTOR_FEED,
             .outer_loop_type = ANGLE_LOOP,
-            .close_loop_type = SPEED_LOOP | ANGLE_LOOP,
+            .close_loop_type = ANGLE_LOOP,      // ← 去掉 SPEED_LOOP（关键）
             .motor_reverse_flag = MOTOR_DIRECTION_REVERSE,
         },
         .motor_type = GM6020,
