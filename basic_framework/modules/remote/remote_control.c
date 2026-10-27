@@ -102,7 +102,9 @@ static void sbus_to_rc(const uint8_t *sbus_buf)
  */
 static void fs_to_rc(const uint8_t *sbus_buf)
 {
-   
+    /* SBUS 帧头固定 0x0F, 校验失败直接丢弃本帧 */
+    if (sbus_buf[0] != 0x0F)
+        return;
     fs_rc_ctrl[TEMP].rc.rocker_r_ = ((sbus_buf[1]     | sbus_buf[2] << 8) & 0x07FF)-1024u;
     fs_rc_ctrl[TEMP].rc.rocker_r1 = ((sbus_buf[2] >> 3 | sbus_buf[3] << 5) & 0x07FF) -1024u;
     fs_rc_ctrl[TEMP].rc.rocker_l1 = ((sbus_buf[3] >> 6 | sbus_buf[4] << 2 | sbus_buf[5] << 10) & 0x07FF) - 1024u;

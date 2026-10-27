@@ -27,6 +27,9 @@
 #define HALF_WHEEL_BASE (WHEEL_BASE / 2.0f)     // 半轴距
 #define HALF_TRACK_WIDTH (TRACK_WIDTH / 2.0f)   // 半轮距
 #define PERIMETER_WHEEL (RADIUS_WHEEL * 2 * PI) // 轮子周长
+/* 参考值斜坡限速, 防止指令阶跃导致电流打满 */
+#define VT_SLEW_APS_PER_S 100000.0f   // 200Hz 下每周期 500 aps
+
 
 /* 底盘应用包含的模块和信息存储,底盘是单例模式,因此不需要为底盘建立单独的结构体 */
 #ifdef CHASSIS_BOARD // 如果是底盘板,使用板载IMU获取底盘转动角速度
@@ -36,6 +39,7 @@ static CANCommInstance *chasiss_can_comm; // 双板通信CAN comm
 attitude_t *Chassis_IMU_data;
 #endif // CHASSIS_BOARD
 #ifdef ONE_BOARD
+
 static Publisher_t *chassis_pub;                    // 用于发布底盘的数据
 static Subscriber_t *chassis_sub;                   // 用于订阅底盘的控制命令
 #endif                                              // !ONE_BOARD
@@ -55,6 +59,16 @@ static DJIMotorInstance *motor_lf, *motor_rf, *motor_lb, *motor_rb; // left righ
 /* 私有函数计算的中介变量,设为静态避免参数传递的开销 */
 static float chassis_vx, chassis_vy;                      // 将云台系的速度投影到底盘
 static float vt_lf, vt_rf, vt_lb, vt_rb;                  // 底盘速度解算后的临时输出,待进行限幅
+
+static float vt_cmd_lf, vt_cmd_rf, vt_cmd_lb, vt_cmd_rb;  // 斜坡限速后的实际下发值
+
+static float slew_limit(float target, float current, float max_step)
+{
+    float d = target - current;
+    if (d > max_step)  return current + max_step;
+    if (d < -max_step) return current - max_step;
+    return target;
+}
 
 /* ---------------- 调试镜像变量 ----------------
  * 仅为方便调试器/波形观察而存在, 不参与任何控制逻辑.
@@ -79,13 +93,12 @@ void ChassisInit()
         .can_init_config.can_handle = &hcan1,
         .controller_param_init_config = {
             .speed_PID = {
-                .Kp = 5.0f, 
+                .Kp = 3.0f, 
                 .Ki = 0,   
                 .Kd = 0,   
                 .IntegralLimit = 3000,
                 .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
                 .MaxOut = 15000,
-                .Output_LPF_RC = 0.3,
             },
         },
         .controller_setting_init_config = {
@@ -212,11 +225,19 @@ static void LimitChassisOutput()
     // referee_data->PowerHeatData.chassis_power;
     // referee_data->PowerHeatData.chassis_power_buffer;
 
+    /* 参考值斜坡限速: 防止 ref 阶跃(摇杆瞬断/离线/急停)导致电流打满 */
+    const float max_step = VT_SLEW_APS_PER_S * 0.005f;   // 200Hz → 5ms
+
+    vt_cmd_lf = slew_limit(vt_lf, vt_cmd_lf, max_step);
+    vt_cmd_rf = slew_limit(vt_rf, vt_cmd_rf, max_step);
+    vt_cmd_lb = slew_limit(vt_lb, vt_cmd_lb, max_step);
+    vt_cmd_rb = slew_limit(vt_rb, vt_cmd_rb, max_step);
+
     // 完成功率限制后进行电机参考输入设定
-    DJIMotorSetRef(motor_lf, vt_lf);
-    DJIMotorSetRef(motor_rf, vt_rf);
-    DJIMotorSetRef(motor_lb, vt_lb);
-    DJIMotorSetRef(motor_rb, vt_rb);
+    DJIMotorSetRef(motor_lf, vt_cmd_lf);
+    DJIMotorSetRef(motor_rf, vt_cmd_rf);
+    DJIMotorSetRef(motor_lb, vt_cmd_lb);
+    DJIMotorSetRef(motor_rb, vt_cmd_rb);
 }
 
 /**
@@ -241,8 +262,8 @@ static void EstimateSpeed()
     const float aps_2_mps = PI2 * (RADIUS_WHEEL / 1000.0f) /
                             (RPM_2_ANGLE_PER_SEC * REDUCTION_RATIO_WHEEL * 60.0f);
 
-    chassis_feedback_data.real_vx = vx_aps * aps_2_mps;
-    chassis_feedback_data.real_vy = vy_aps * aps_2_mps;
+    chassis_feedback_data.real_vx = vx_aps * OMNI_KX * aps_2_mps;
+    chassis_feedback_data.real_vy = vy_aps * OMNI_KY * aps_2_mps;
     /* wz 不能复用伪单位 wz_aps, 直接用平均轮速换算: ω = v_wheel / r0 */
     chassis_feedback_data.real_wz = (lf + rf + lb + rb) * 0.25f * aps_2_mps /
                                     (OMNI_R0 / 1000.0f) * RAD_2_DEGREE;
@@ -298,7 +319,7 @@ void ChassisTask()
         chassis_cmd_recv.wz = 0;
         break;
     case CHASSIS_FOLLOW_GIMBAL_YAW: // 跟随云台,不单独设置pid,以误差角度平方为速度输出
-        chassis_cmd_recv.wz = -1.5f * chassis_cmd_recv.offset_angle * abs(chassis_cmd_recv.offset_angle);
+        chassis_cmd_recv.wz = -1.5f * chassis_cmd_recv.offset_angle * fabsf(chassis_cmd_recv.offset_angle);
         break;
     case CHASSIS_ROTATE: // 自旋, 幅值固定, 方向来自命令符号
         chassis_cmd_recv.wz = (chassis_cmd_recv.wz < 0.0f) ? -200.0f : 200.0f;
@@ -330,14 +351,14 @@ void ChassisTask()
 
     // 同步调试镜像变量(不影响控制, 供波形观察)
     dbg_ref_lf = motor_lf->motor_controller.pid_ref;
-    dbg_spd_lf = motor_lf->measure.speed_aps / 6.0f;
+    dbg_spd_lf = motor_lf->measure.speed_aps;
     dbg_out_lf = motor_lf->motor_controller.speed_PID.Output;
     dbg_ref_rf = motor_rf->motor_controller.pid_ref;
-    dbg_spd_rf = motor_rf->measure.speed_aps / 6.0f;
+    dbg_spd_rf = motor_rf->measure.speed_aps;
     dbg_ref_lb = motor_lb->motor_controller.pid_ref;
-    dbg_spd_lb = motor_lb->measure.speed_aps / 6.0f;
+    dbg_spd_lb = motor_lb->measure.speed_aps;
     dbg_ref_rb = motor_rb->motor_controller.pid_ref;
-    dbg_spd_rb = motor_rb->measure.speed_aps / 6.0f;
+    dbg_spd_rb = motor_rb->measure.speed_aps;
     dbg_real_vx = chassis_feedback_data.real_vx;
     dbg_real_vy = chassis_feedback_data.real_vy;
     dbg_real_wz = chassis_feedback_data.real_wz;

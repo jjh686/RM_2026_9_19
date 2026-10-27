@@ -216,8 +216,8 @@ static void RemoteControlSet()
     // 云台软件限位
 
     // 底盘参数,目前没有加入小陀螺(调试似乎暂时没有必要),系数需要调整
-    chassis_cmd_send.vx = 2.0f * (float)rc_compat[TEMP].rc.rocker_r1;  // CH2 竖直 → 前进
-    chassis_cmd_send.vy = 2.0f * (float)rc_compat[TEMP].rc.rocker_r_;  // CH1 水平 → 横移
+    chassis_cmd_send.vx = 12.0f * (float)rc_compat[TEMP].rc.rocker_r1;  // CH2 竖直 → 前进
+    chassis_cmd_send.vy = 12.0f * (float)rc_compat[TEMP].rc.rocker_r_;  // CH1 水平 → 横移
 
     // 发射参数
     if (switch_is_up(rc_compat[TEMP].rc.switch_right)) // 右侧开关状态[上],弹舱打开
@@ -226,12 +226,12 @@ static void RemoteControlSet()
         ; // 弹舱舵机控制,待添加servo_motor模块,关闭
 
     // 摩擦轮控制,拨轮向上打为负,向下为正
-    if (rc_compat[TEMP].rc.dial < -100) // 向上超过100,打开摩擦轮
+    if (rc_compat[TEMP].rc.dial < -200) // 向上超过200,打开摩擦轮
         shoot_cmd_send.friction_mode = FRICTION_ON;
     else
         shoot_cmd_send.friction_mode = FRICTION_OFF;
     // 拨弹控制,遥控器固定为一种拨弹模式,可自行选择
-    if (rc_compat[TEMP].rc.dial < -500)
+    if (rc_compat[TEMP].rc.dial < -550)
         shoot_cmd_send.load_mode = LOAD_BURSTFIRE;
     else
         shoot_cmd_send.load_mode = LOAD_STOP;
@@ -335,7 +335,9 @@ static void MouseKeySet()
 static void EmergencyHandler()
 {
     static uint8_t in_estop = 0;
-    // 修后 dial 满量程只有 -671~+670, 阈值从 700 下调到 550
+    static uint8_t estop_timing = 0;      // 1=正在计时恢复
+    static float   estop_exit_ms = 0.0f;  // 开始计时的时刻
+
     if (rc_compat[TEMP].rc.dial > 550 || robot_state == ROBOT_STOP)
     {
         robot_state = ROBOT_STOP;
@@ -345,22 +347,44 @@ static void EmergencyHandler()
         shoot_cmd_send.friction_mode = FRICTION_OFF;
         shoot_cmd_send.load_mode = LOAD_STOP;
         if (!in_estop) { LOGERROR("[CMD] emergency stop!"); in_estop = 1; }
+
+        /* 自动恢复: 旋钮已离开急停位且遥控在线, 持续 1 秒后解除 */
+        if (rc_compat[TEMP].rc.dial > 550 || !RemoteControlIsOnline())
+        {
+            estop_timing = 0;                       // 仍不安全, 计时清零
+        }
+        else if (!estop_timing)
+        {
+            estop_timing = 1;
+            estop_exit_ms = DWT_GetTimeline_ms();   // 开始计时
+        }
+        else if (DWT_GetTimeline_ms() - estop_exit_ms > 1000.0f)
+        {
+            robot_state = ROBOT_READY;
+            shoot_cmd_send.shoot_mode = SHOOT_ON;
+            estop_timing = 0;
+            in_estop = 0;
+            LOGINFO("[CMD] auto reinstate after 1s safe");
+        }
     }
     else
     {
         in_estop = 0;
+        estop_timing = 0;
     }
-    // 遥控器右侧开关为[上],恢复正常运行(边沿触发,避免 200Hz 刷屏)
-    static uint8_t last_sw_up = 0;
-    uint8_t now_sw_up = switch_is_up(rc_compat[TEMP].rc.switch_right) ? 1 : 0;
-    if (now_sw_up && !last_sw_up &&rc_compat[TEMP].rc.dial < 550 &&
-    RemoteControlIsOnline())
+
+    /* 保留原有开关边沿复位(立即生效, 不用等 1 秒) */
+    static uint8_t last_sw_safe = 0;
+    uint8_t now_sw_safe = switch_is_down(rc_compat[TEMP].rc.switch_right) ? 0 : 1;
+    if (now_sw_safe && !last_sw_safe && rc_compat[TEMP].rc.dial < 550 &&
+        RemoteControlIsOnline())
     {
         robot_state = ROBOT_READY;
         shoot_cmd_send.shoot_mode = SHOOT_ON;
+        estop_timing = 0;
         LOGINFO("[CMD] reinstate, robot ready");
     }
-    last_sw_up = now_sw_up;
+    last_sw_safe = now_sw_safe;
 }
 
 /* 机器人核心控制任务,200Hz频率运行(必须高于视觉发送频率) */
