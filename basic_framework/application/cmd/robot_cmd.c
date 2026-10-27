@@ -68,7 +68,7 @@ static void FS2RC_Adapt(void)
     rc_compat[TEMP].rc.switch_left  = sw_map[fs_rc_data[TEMP].channel[7]];  /* CH8 */
 
     rc_compat[TEMP].rc.dial = fs_rc_data[TEMP].rc.knob_l;                 /* CH5 左旋钮 → 急停 */
-    spin_dir = (fs_rc_data[TEMP].rc.knob_r > 700) ? -1 : 1;               /* CH6 右旋钮 → 自旋方向 */
+    spin_dir = (fs_rc_data[TEMP].rc.knob_r > 400) ? -1 : 1;   // 拧到偏左(正)侧才反向
 
     /* 摇杆死区, 防止中立点漂移导致底盘缓慢爬行 */
     if (abs(rc_compat[TEMP].rc.rocker_l_) < 20) rc_compat[TEMP].rc.rocker_l_ = 0;
@@ -245,6 +245,8 @@ static void RemoteControlSet()
  */
 static void MouseKeySet()
 {
+    chassis_cmd_send.chassis_mode = CHASSIS_NO_FOLLOW; // 键盘模式同样需要明确模式, 否则可能残留 ZERO_FORCE
+    gimbal_cmd_send.gimbal_mode = GIMBAL_GYRO_MODE;   // 云台同理, 否则可能残留 ZERO_FORCE
     chassis_cmd_send.vx = rc_compat[TEMP].key[KEY_PRESS].w * 300 - rc_compat[TEMP].key[KEY_PRESS].s * 300; // 系数待测
     chassis_cmd_send.vy = rc_compat[TEMP].key[KEY_PRESS].s * 300 - rc_compat[TEMP].key[KEY_PRESS].d * 300;
 
@@ -333,8 +335,8 @@ static void MouseKeySet()
 static void EmergencyHandler()
 {
     static uint8_t in_estop = 0;
-    // 拨轮的向下拨超过一半进入急停模式.注意向打时下拨轮是正
-    if (rc_compat[TEMP].rc.dial > 600 || robot_state == ROBOT_STOP) // 还需添加重要应用和模块离线的判断
+    // 修后 dial 满量程只有 -671~+670, 阈值从 700 下调到 550
+    if (rc_compat[TEMP].rc.dial > 550 || robot_state == ROBOT_STOP)
     {
         robot_state = ROBOT_STOP;
         gimbal_cmd_send.gimbal_mode = GIMBAL_ZERO_FORCE;
@@ -351,7 +353,8 @@ static void EmergencyHandler()
     // 遥控器右侧开关为[上],恢复正常运行(边沿触发,避免 200Hz 刷屏)
     static uint8_t last_sw_up = 0;
     uint8_t now_sw_up = switch_is_up(rc_compat[TEMP].rc.switch_right) ? 1 : 0;
-    if (now_sw_up && !last_sw_up)
+    if (now_sw_up && !last_sw_up &&rc_compat[TEMP].rc.dial < 550 &&
+    RemoteControlIsOnline())
     {
         robot_state = ROBOT_READY;
         shoot_cmd_send.shoot_mode = SHOOT_ON;

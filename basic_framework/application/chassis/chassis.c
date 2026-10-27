@@ -56,6 +56,22 @@ static DJIMotorInstance *motor_lf, *motor_rf, *motor_lb, *motor_rb; // left righ
 static float chassis_vx, chassis_vy;                      // 将云台系的速度投影到底盘
 static float vt_lf, vt_rf, vt_lb, vt_rb;                  // 底盘速度解算后的临时输出,待进行限幅
 
+/* ---------------- 调试镜像变量 ----------------
+ * 仅为方便调试器/波形观察而存在, 不参与任何控制逻辑.
+ * 电机实例在堆上, 路径形如 chassis.c::motor_lf->measure.speed_aps 又长又不便输入,
+ * 因此每周期把关心的量复制到这几个全局标量里, 之后直接看 dbg_* 即可.
+ * 单位: ref/spd 均为转子度/秒(aps), 与 pid_ref / speed_aps 完全一致.
+ * 正式比赛若要清理, 删掉本段与 ChassisTask 末尾的同步语句即可.
+ */
+volatile float dbg_ref_lf, dbg_spd_lf;                    // 左前 目标/实际
+volatile float dbg_ref_rf, dbg_spd_rf;                    // 右前 目标/实际
+volatile float dbg_ref_lb, dbg_spd_lb;                    // 左后 目标/实际
+volatile float dbg_ref_rb, dbg_spd_rb;                    // 右后 目标/实际
+volatile float dbg_out_lf;                                // 左前 速度环输出(电流设定值)
+
+/* 底盘实际速度(m/s, deg/s), 由 EstimateSpeed 逆解算得到 */
+volatile float dbg_real_vx, dbg_real_vy, dbg_real_wz;
+
 void ChassisInit()
 {
     // 四个轮子的参数一样,改tx_id和反转标志位即可
@@ -63,9 +79,9 @@ void ChassisInit()
         .can_init_config.can_handle = &hcan1,
         .controller_param_init_config = {
             .speed_PID = {
-                .Kp = 4.5, // 4.5
-                .Ki = 0,   // 0
-                .Kd = 0,   // 0
+                .Kp = 5.0f, 
+                .Ki = 0,   
+                .Kd = 0,   
                 .IntegralLimit = 3000,
                 .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
                 .MaxOut = 15000,
@@ -102,7 +118,7 @@ void ChassisInit()
 
 /* Buffer环暂未测试，逻辑是计算期望buffer与实际buffer的差值，转换为冗余的功率，todo：输入给功率控制部分，待完善 */
     PID_Init_Config_s Buffer_pid_conf = {
-        .Kp = 0.1,
+        .Kp = 0.1f,
         .Ki = 0,
         .Kd = 0,
         .IntegralLimit = 1000,
@@ -311,6 +327,20 @@ void ChassisTask()
 
     // 根据电机的反馈速度和IMU(如果有)计算真实速度
     EstimateSpeed();
+
+    // 同步调试镜像变量(不影响控制, 供波形观察)
+    dbg_ref_lf = motor_lf->motor_controller.pid_ref;
+    dbg_spd_lf = motor_lf->measure.speed_aps / 6.0f;
+    dbg_out_lf = motor_lf->motor_controller.speed_PID.Output;
+    dbg_ref_rf = motor_rf->motor_controller.pid_ref;
+    dbg_spd_rf = motor_rf->measure.speed_aps / 6.0f;
+    dbg_ref_lb = motor_lb->motor_controller.pid_ref;
+    dbg_spd_lb = motor_lb->measure.speed_aps / 6.0f;
+    dbg_ref_rb = motor_rb->motor_controller.pid_ref;
+    dbg_spd_rb = motor_rb->measure.speed_aps / 6.0f;
+    dbg_real_vx = chassis_feedback_data.real_vx;
+    dbg_real_vy = chassis_feedback_data.real_vy;
+    dbg_real_wz = chassis_feedback_data.real_wz;
 
     // // 获取裁判系统数据   建议将裁判系统与底盘分离，所以此处数据应使用消息中心发送
     // // 我方颜色id小于7是红色,大于7是蓝色,注意这里发送的是对方的颜色, 0:blue , 1:red

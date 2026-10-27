@@ -115,9 +115,11 @@ static void fs_to_rc(const uint8_t *sbus_buf)
             *(&fs_rc_ctrl[TEMP].rc.rocker_l_ + i) = -660;
         }
            
-    //旋钮
-    fs_rc_ctrl[TEMP].rc.knob_l = ((sbus_buf[6] >> 4 | sbus_buf[7] << 4) & 0x07FF)-240u;
-    fs_rc_ctrl[TEMP].rc.knob_r = ((sbus_buf[7] >> 7 | sbus_buf[8] << 1 | sbus_buf[9] << 9) & 0x07FF)-240u;
+    /* SBUS 旋钮: 本机 LD 实测 原始 353~1694, 中位 1026
+     * 减 1024 使中位归 0, 与 DBUS 的 ±660 语义一致
+     * 修后: 最右 -671 / 中位 0 / 最左 +670 */
+    fs_rc_ctrl[TEMP].rc.knob_l = ((sbus_buf[6] >> 4 | sbus_buf[7] << 4) & 0x07FF) - 1024;
+    fs_rc_ctrl[TEMP].rc.knob_r = ((sbus_buf[7] >> 7 | sbus_buf[8] << 1 | sbus_buf[9] << 9) & 0x07FF) - 1024;
     //拨杆0上，1中，2下
     fs_rc_ctrl[TEMP].channel[6] = ((sbus_buf[9] >> 2 | sbus_buf[10] << 6) & 0x07FF);
     fs_rc_ctrl[TEMP].channel[7] = ((sbus_buf[10] >> 5 | sbus_buf[11] << 3) & 0x07FF);
