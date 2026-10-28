@@ -71,10 +71,10 @@ static void FS2RC_Adapt(void)
     spin_dir = (fs_rc_data[TEMP].rc.knob_r > 400) ? -1 : 1;   // 拧到偏左(正)侧才反向
 
     /* 摇杆死区, 防止中立点漂移导致底盘缓慢爬行 */
-    if (abs(rc_compat[TEMP].rc.rocker_l_) < 20) rc_compat[TEMP].rc.rocker_l_ = 0;
-    if (abs(rc_compat[TEMP].rc.rocker_l1) < 20) rc_compat[TEMP].rc.rocker_l1 = 0;
-    if (abs(rc_compat[TEMP].rc.rocker_r_) < 20) rc_compat[TEMP].rc.rocker_r_ = 0;
-    if (abs(rc_compat[TEMP].rc.rocker_r1) < 20) rc_compat[TEMP].rc.rocker_r1 = 0;
+    if (abs(rc_compat[TEMP].rc.rocker_l_) < 30) rc_compat[TEMP].rc.rocker_l_ = 0;
+    if (abs(rc_compat[TEMP].rc.rocker_l1) < 30) rc_compat[TEMP].rc.rocker_l1 = 0;
+    if (abs(rc_compat[TEMP].rc.rocker_r_) < 30) rc_compat[TEMP].rc.rocker_r_ = 0;
+    if (abs(rc_compat[TEMP].rc.rocker_r1) < 30) rc_compat[TEMP].rc.rocker_r1 = 0;
 }
 
 void RobotCMDInit()

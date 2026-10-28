@@ -28,7 +28,7 @@
 #define HALF_TRACK_WIDTH (TRACK_WIDTH / 2.0f)   // 半轮距
 #define PERIMETER_WHEEL (RADIUS_WHEEL * 2 * PI) // 轮子周长
 /* 参考值斜坡限速, 防止指令阶跃导致电流打满 */
-#define VT_SLEW_APS_PER_S 100000.0f   // 200Hz 下每周期 500 aps
+#define VT_SLEW_APS_PER_S 60000.0f   // 200Hz 下每周期 500 aps
 
 
 /* 底盘应用包含的模块和信息存储,底盘是单例模式,因此不需要为底盘建立单独的结构体 */
@@ -94,9 +94,9 @@ void ChassisInit()
         .controller_param_init_config = {
             .speed_PID = {
                 .Kp = 3.0f, 
-                .Ki = 0,   
+                .Ki = 0.3f,   
                 .Kd = 0,   
-                .IntegralLimit = 3000,
+                .IntegralLimit = 700,
                 .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
                 .MaxOut = 15000,
             },
@@ -199,6 +199,16 @@ static void MecanumCalculate()
 #define OMNI_KY (OMNI_A / OMNI_R0)
 #define OMNI_KW (OMNI_R0 * DEGREE_2_RAD)
 
+/* ---------------- 单轮增益补偿 ----------------
+ * 落地实测: motor_rf(右前) 和 motor_lb(左后) 速度偏低
+ * 系数 = 最快轮速度 / 该轮速度, >1 表示提升该轮目标值
+ * 注意: 补偿会让慢轮电流增大, 需监控温度
+ */
+#define LF_COMP   1.000f   // 左前
+#define RF_COMP   1.000f   // 右前
+#define LB_COMP   1.000f   // 左后
+#define RB_COMP   1.000f   // 右后
+
 /**
  * @brief 四轮X型全向轮正运动学
  *        期望: vx>0 → [+ - + -] ; vy>0 → [+ + - -] ; wz>0 → [+ + + +]
@@ -211,6 +221,16 @@ static void OmniCalculate()
     vt_rf = -OMNI_KX * chassis_vx + OMNI_KY * chassis_vy + w;
     vt_lb =  OMNI_KX * chassis_vx - OMNI_KY * chassis_vy + w;
     vt_rb = -OMNI_KX * chassis_vx - OMNI_KY * chassis_vy + w;
+
+    /* 只在接近直行时补偿, 避免影响横移 */
+    if (fabsf(chassis_vy) < 100.0f)
+    {
+        vt_lf *= LF_COMP;
+        vt_rf *= RF_COMP;
+        vt_lb *= LB_COMP;
+        vt_rb *= RB_COMP;
+    }
+
 }
 
 #endif /* CHASSIS_OMNI */
@@ -233,6 +253,16 @@ static void LimitChassisOutput()
     vt_cmd_lb = slew_limit(vt_lb, vt_cmd_lb, max_step);
     vt_cmd_rb = slew_limit(vt_rb, vt_cmd_rb, max_step);
 
+    /* 参考值为 0 时清积分 + 停电机, 彻底消除零速抖动 */
+    if (fabsf(vt_cmd_lf) < 1.0f) { motor_lf->motor_controller.speed_PID.Iout = 0.0f; DJIMotorStop(motor_lf); }
+    else                          { DJIMotorEnable(motor_lf); }
+    if (fabsf(vt_cmd_rf) < 1.0f) { motor_rf->motor_controller.speed_PID.Iout = 0.0f; DJIMotorStop(motor_rf); }
+    else                          { DJIMotorEnable(motor_rf); }
+    if (fabsf(vt_cmd_lb) < 1.0f) { motor_lb->motor_controller.speed_PID.Iout = 0.0f; DJIMotorStop(motor_lb); }
+    else                          { DJIMotorEnable(motor_lb); }
+    if (fabsf(vt_cmd_rb) < 1.0f) { motor_rb->motor_controller.speed_PID.Iout = 0.0f; DJIMotorStop(motor_rb); }
+    else                          { DJIMotorEnable(motor_rb); }
+    
     // 完成功率限制后进行电机参考输入设定
     DJIMotorSetRef(motor_lf, vt_cmd_lf);
     DJIMotorSetRef(motor_rf, vt_cmd_rf);
