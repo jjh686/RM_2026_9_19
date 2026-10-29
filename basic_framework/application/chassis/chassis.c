@@ -28,7 +28,7 @@
 #define HALF_TRACK_WIDTH (TRACK_WIDTH / 2.0f)   // 半轮距
 #define PERIMETER_WHEEL (RADIUS_WHEEL * 2 * PI) // 轮子周长
 /* 参考值斜坡限速, 防止指令阶跃导致电流打满 */
-#define VT_SLEW_APS_PER_S 60000.0f   // 200Hz 下每周期 500 aps
+#define VT_SLEW_APS_PER_S 50000.0f   // 200Hz 下每周期 500 aps
 
 
 /* 底盘应用包含的模块和信息存储,底盘是单例模式,因此不需要为底盘建立单独的结构体 */
@@ -205,9 +205,9 @@ static void MecanumCalculate()
  * 注意: 补偿会让慢轮电流增大, 需监控温度
  */
 #define LF_COMP   1.000f   // 左前
-#define RF_COMP   1.000f   // 右前
+#define RF_COMP   1.040f   // 右前
 #define LB_COMP   1.000f   // 左后
-#define RB_COMP   1.000f   // 右后
+#define RB_COMP   1.040f   // 右后
 
 /**
  * @brief 四轮X型全向轮正运动学
@@ -244,6 +244,27 @@ static void LimitChassisOutput()
     // 功率限制待添加
     // referee_data->PowerHeatData.chassis_power;
     // referee_data->PowerHeatData.chassis_power_buffer;
+
+        /* ===== 急停/零力模式: 直接停, 严禁后面的逻辑重新使能 ===== */
+    if (chassis_cmd_recv.chassis_mode == CHASSIS_ZERO_FORCE)
+    {
+        DJIMotorSetRef(motor_lf, 0.0f);
+        DJIMotorSetRef(motor_rf, 0.0f);
+        DJIMotorSetRef(motor_lb, 0.0f);
+        DJIMotorSetRef(motor_rb, 0.0f);
+
+        DJIMotorStop(motor_lf);
+        DJIMotorStop(motor_rf);
+        DJIMotorStop(motor_lb);
+        DJIMotorStop(motor_rb);
+
+        /* 斜坡状态清零, 避免恢复瞬间冲一下 */
+        vt_cmd_lf = 0.0f;
+        vt_cmd_rf = 0.0f;
+        vt_cmd_lb = 0.0f;
+        vt_cmd_rb = 0.0f;
+        return;
+    }
 
     /* 参考值斜坡限速: 防止 ref 阶跃(摇杆瞬断/离线/急停)导致电流打满 */
     const float max_step = VT_SLEW_APS_PER_S * 0.005f;   // 200Hz → 5ms
@@ -352,7 +373,7 @@ void ChassisTask()
         chassis_cmd_recv.wz = -1.5f * chassis_cmd_recv.offset_angle * fabsf(chassis_cmd_recv.offset_angle);
         break;
     case CHASSIS_ROTATE: // 自旋, 幅值固定, 方向来自命令符号
-        chassis_cmd_recv.wz = (chassis_cmd_recv.wz < 0.0f) ? -200.0f : 200.0f;
+        chassis_cmd_recv.wz = (chassis_cmd_recv.wz < 0.0f) ? -600.0f : 600.0f;
         break;
     default:
         break;
