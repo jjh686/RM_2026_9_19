@@ -95,6 +95,60 @@ static void sbus_to_rc(const uint8_t *sbus_buf)
     memcpy(&rc_ctrl[LAST], &rc_ctrl[TEMP], sizeof(RC_ctrl_t)); // 保存上一次的数据,用于按键持续按下和切换的判断
 }
 
+/* SB(CH7) 异常值连续确认: 连续 N 帧都非法才按上档(急停)处理
+ * 3 帧 × 14ms(SBUS 70Hz) ≈ 42ms, 既能挡单帧误码, 急停响应也不迟钝 */
+#define SB_BAD_FRAME_THRESHOLD   3u
+
+/* 连续非法帧计数, 仅 fs_to_rc 内部使用 */
+static uint8_t s_sb_bad_cnt = 0;
+
+/**
+ * @brief 把 SBUS 原始开关值映射为 0(上)/1(中)/2(下), 非法值按规则兜底
+ * @param idx  channel 下标, 6=SB(CH7), 7=SC(CH8), 8/9=备用
+ * @param val  原始 11bit 值
+ */
+static uint16_t fs_map_switch(uint8_t idx, uint16_t val)
+{
+    uint16_t result = 0xFFu;   /* 0xFF 表示落在三个合法区间之外 */
+
+    if (val > SWITCH_HIGH - SWITCH_TOLERANCE && val < SWITCH_HIGH + SWITCH_TOLERANCE)
+    {
+        result = 2;            /* 下挡 */
+    }
+    else if (val > SWITCH_MID - SWITCH_TOLERANCE && val < SWITCH_MID + SWITCH_TOLERANCE)
+    {
+        result = 1;            /* 中挡 */
+    }
+    else if (val > SWITCH_LOW - SWITCH_TOLERANCE && val < SWITCH_LOW + SWITCH_TOLERANCE)
+    {
+        result = 0;            /* 上挡 */
+    }
+
+    if (idx == 6)
+    {
+        /* SB: 合法帧清零计数, 非法帧累加, 达到阈值才判上档 */
+        if (result != 0xFFu)
+        {
+            s_sb_bad_cnt = 0;
+        }
+        else
+        {
+            if (s_sb_bad_cnt < 0xFFu)
+                s_sb_bad_cnt++;
+
+            result = (s_sb_bad_cnt >= SB_BAD_FRAME_THRESHOLD) ? FS_RC_SW_UP
+                                                              : FS_RC_SW_MID;
+        }
+    }
+    else if (result == 0xFFu)
+    {
+        /* 其他开关: 非法值维持原来的默认中档 */
+        result = FS_RC_SW_MID;
+    }
+
+    return result;
+}
+
 /**
  * @brief 遥控器数据解析
  *
@@ -127,25 +181,10 @@ static void fs_to_rc(const uint8_t *sbus_buf)
     fs_rc_ctrl[TEMP].channel[7] = ((sbus_buf[10] >> 5 | sbus_buf[11] << 3) & 0x07FF);
     fs_rc_ctrl[TEMP].channel[8] = ((sbus_buf[12] | sbus_buf[13] << 8 ) & 0x07FF);
     fs_rc_ctrl[TEMP].channel[9] = ((sbus_buf[13] >> 3 | sbus_buf[14] << 5) & 0x07FF);
-    for (int i = 6; i <= 9; i++) 
+    for (int i = 6; i <= 9; i++)
     {
-        uint16_t val = fs_rc_ctrl[TEMP].channel[i];
-        if (val > SWITCH_HIGH - SWITCH_TOLERANCE && val < SWITCH_HIGH + SWITCH_TOLERANCE)
-        {
-            fs_rc_ctrl[TEMP].channel[i] = 2; // 下挡
-        }
-        else if (val > SWITCH_MID - SWITCH_TOLERANCE && val < SWITCH_MID + SWITCH_TOLERANCE)
-        {
-            fs_rc_ctrl[TEMP].channel[i] = 1; // 中挡
-        }
-        else if (val > SWITCH_LOW - SWITCH_TOLERANCE && val < SWITCH_LOW + SWITCH_TOLERANCE)
-        {
-            fs_rc_ctrl[TEMP].channel[i] = 0; // 上挡
-        }
-        else
-        {
-            fs_rc_ctrl[TEMP].channel[i] = 1; // 默认归中
-        }
+        fs_rc_ctrl[TEMP].channel[i] =
+            fs_map_switch((uint8_t)i, fs_rc_ctrl[TEMP].channel[i]);
     }
 
     fs_rc_ctrl[TEMP].rc.switch_left_1 = fs_rc_ctrl[TEMP].channel[6];
