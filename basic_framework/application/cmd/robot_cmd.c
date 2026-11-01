@@ -9,6 +9,7 @@
 #include "general_def.h"
 #include "dji_motor.h"
 #include "bmi088.h"
+#include "referee_task.h"
 // bsp
 #include "bsp_dwt.h"
 #include "bsp_log.h"
@@ -211,6 +212,7 @@ static void RemoteControlSet()
     else if (switch_is_mid(rc_compat[TEMP].rc.switch_right)) // 右侧开关状态[中],底盘和云台分离,底盘保持不转动
     {
         chassis_cmd_send.chassis_mode = CHASSIS_NO_FOLLOW;
+        chassis_cmd_send.wz = 0.0f;
         gimbal_cmd_send.gimbal_mode = GIMBAL_FREE_MODE;
     }
 
@@ -221,37 +223,57 @@ static void RemoteControlSet()
         gimbal_cmd_send.gimbal_mode = GIMBAL_ZERO_FORCE;
     }
 
-    // 云台参数,确定云台控制数据
-    if (switch_is_mid(rc_compat[TEMP].rc.switch_left)) // 左侧开关状态为[中],视觉模式
+    /* 1. 云台控制 */
+    if (switch_is_mid(rc_compat[TEMP].rc.switch_left) && VisionIsOnline())
     {
-        // 待添加,视觉会发来和目标的误差,同样将其转化为total angle的增量进行控制
-        // ...
+        // 左开关[中]且上位机在线: 视觉/导航接管
+        if (vision_recv_data->target_state != NO_TARGET)
+        {
+            gimbal_cmd_send.yaw   = vision_recv_data->yaw;
+            gimbal_cmd_send.pitch = vision_recv_data->pitch;
+        }
+        if (vision_recv_data->posture_cmd >= 1 && vision_recv_data->posture_cmd <= 6)
+        {
+            SentrySetPosture(vision_recv_data->posture_cmd); // 同步上位机期望的哨兵姿态
+        }
     }
-    // 左侧开关状态为[下],或视觉未识别到目标,纯遥控器拨杆控制
-    /* 只有机器人处于运行态才累加云台角度, 急停时冻结 */
-    if (robot_state == ROBOT_READY &&
-        (switch_is_down(rc_compat[TEMP].rc.switch_left) ||
-         vision_recv_data->target_state == NO_TARGET))
+    else if (robot_state == ROBOT_READY)
     {
+        // 左开关[下]或视觉无目标: 遥控器摇杆控制云台
         gimbal_cmd_send.yaw   += 0.005f * (float)rc_compat[TEMP].rc.rocker_l_;
         gimbal_cmd_send.pitch += 0.001f * (float)rc_compat[TEMP].rc.rocker_l1;
     }
-    // 云台软件限位
 
-    /* LD(CH5) 调速: -660~+660 → 20%~100% */
+    /* 2. 底盘速度控制: 左开关[中]由上位机导航控制, 左开关[下]由遥控器摇杆控制 */
     float ld = (float)rc_compat[TEMP].rc.dial;
-
     if (ld < -660.0f) ld = -660.0f;
     if (ld >  660.0f) ld =  660.0f;
-
     float ratio       = (ld + 660.0f) / 1320.0f;   // 0 ~ 1
-    float speed_scale = 0.30f + 0.80f * ratio;     // 0.20 ~ 1.00
-
-    chassis_cmd_send.vx = 15.0f * speed_scale * (float)rc_compat[TEMP].rc.rocker_r1;
-    chassis_cmd_send.vy = 15.0f * speed_scale * (float)rc_compat[TEMP].rc.rocker_r_;
-
-    /* 把 LD 倍率以百分比形式传给底盘, 供自旋模式使用 (20 ~ 100) */
+    float speed_scale = 0.30f + 0.80f * ratio;     // 0.30 ~ 1.10
     chassis_cmd_send.chassis_speed_buff = (int)(speed_scale * 100.0f);
+
+    if (switch_is_mid(rc_compat[TEMP].rc.switch_left))
+    {
+        // 左开关[中]: 上位机导航模式 (若上位机离线则安全清零速度)
+        if (VisionIsOnline())
+        {
+            chassis_cmd_send.vx = vision_recv_data->vx;
+            chassis_cmd_send.vy = vision_recv_data->vy;
+            if (chassis_cmd_send.chassis_mode == CHASSIS_NO_FOLLOW)
+                chassis_cmd_send.wz = vision_recv_data->wz;
+        }
+        else
+        {
+            chassis_cmd_send.vx = 0.0f;
+            chassis_cmd_send.vy = 0.0f;
+        }
+    }
+    else
+    {
+        // 左开关[下]: 纯遥控器手动控制底盘
+        chassis_cmd_send.vx = 15.0f * speed_scale * (float)rc_compat[TEMP].rc.rocker_r1;
+        chassis_cmd_send.vy = 15.0f * speed_scale * (float)rc_compat[TEMP].rc.rocker_r_;
+    }
 
     // 发射参数
     if (switch_is_up(rc_compat[TEMP].rc.switch_right)) // 右侧开关状态[上],弹舱打开
@@ -265,6 +287,71 @@ static void RemoteControlSet()
 
     // 射频控制,固定每秒1发,后续可以根据左侧拨轮的值大小切换射频,
     shoot_cmd_send.shoot_rate = 8;
+}
+
+/**
+ * @brief 左开关[中]: 哨兵视觉/导航自动控制模式
+ */
+static void SentryAutoSet(void)
+{
+    /* 1. 右开关仍然保留作为底盘模式/安全档位选择:
+     *    右[下]: 边小陀螺边导航移动
+     *    右[中]: 不小陀螺, 纯全向导航移动
+     *    右[上]: 零力急停
+     */
+    if (!RemoteControlIsOnline() || switch_is_down(rc_compat[TEMP].rc.switch_right))
+    {
+        chassis_cmd_send.chassis_mode = CHASSIS_ROTATE;
+        chassis_cmd_send.wz = (float)spin_dir;
+        chassis_cmd_send.chassis_speed_buff = 80;
+        gimbal_cmd_send.gimbal_mode = GIMBAL_GYRO_MODE;
+    }
+    else if (switch_is_mid(rc_compat[TEMP].rc.switch_right))
+    {
+        chassis_cmd_send.chassis_mode = CHASSIS_NO_FOLLOW;
+        gimbal_cmd_send.gimbal_mode = GIMBAL_GYRO_MODE;
+    }
+    else
+    {
+        chassis_cmd_send.chassis_mode = CHASSIS_ZERO_FORCE;
+        chassis_cmd_send.wz = 0.0f;
+        gimbal_cmd_send.gimbal_mode = GIMBAL_ZERO_FORCE;
+        return;
+    }
+
+    /* 2. 接收上位机(视觉/导航)控制指令, 若上位机离线则安全清零 */
+    if (VisionIsOnline())
+    {
+        // 底盘导航速度
+        chassis_cmd_send.vx = vision_recv_data->vx;
+        chassis_cmd_send.vy = vision_recv_data->vy;
+        if (chassis_cmd_send.chassis_mode == CHASSIS_NO_FOLLOW)
+            chassis_cmd_send.wz = vision_recv_data->wz;
+
+        // 云台自瞄角度
+        if (vision_recv_data->target_state != NO_TARGET)
+        {
+            gimbal_cmd_send.yaw   = vision_recv_data->yaw;
+            gimbal_cmd_send.pitch = vision_recv_data->pitch;
+        }
+
+        // 同步上位机期望的哨兵姿态 (1~6)
+        if (vision_recv_data->posture_cmd >= 1 && vision_recv_data->posture_cmd <= 6)
+        {
+            SentrySetPosture(vision_recv_data->posture_cmd);
+        }
+    }
+    else
+    {
+        // 上位机未连接或断线: 底盘原地停稳, 防止乱跑
+        chassis_cmd_send.vx = 0.0f;
+        chassis_cmd_send.vy = 0.0f;
+        if (chassis_cmd_send.chassis_mode == CHASSIS_NO_FOLLOW)
+            chassis_cmd_send.wz = 0.0f;
+    }
+
+    shoot_cmd_send.friction_mode = FRICTION_OFF;
+    shoot_cmd_send.load_mode = LOAD_STOP;
 }
 
 /**
@@ -363,11 +450,12 @@ static void MouseKeySet()
 static void EmergencyHandler(void)
 {
     uint8_t sb = rc_compat[TEMP].rc.switch_right;
+    uint8_t in_match = (GetRefereeData()->GameState.game_progress == 4); // 正式比赛进行中
 
-    /* 只有遥控在线，且 SB 明确在中档或下档，才允许运行 */
+    /* 遥控器在线且SB在中/下档，或者正式比赛进行中且遥控器已关控，才允许运行 */
     uint8_t allow_run =
-        RemoteControlIsOnline() &&
-        (switch_is_mid(sb) || switch_is_down(sb));
+        (RemoteControlIsOnline() && (switch_is_mid(sb) || switch_is_down(sb))) ||
+        (!RemoteControlIsOnline() && in_match);
 
     if (!allow_run)
     {
@@ -417,24 +505,23 @@ void RobotCMDTask()
     #ifndef CHASSIS_DEBUG_NO_GIMBAL
         CalcOffsetAngle();
     #endif
-    // 根据遥控器左侧开关,确定当前使用的控制模式为遥控器调试还是键鼠
-    if (switch_is_down(rc_compat[TEMP].rc.switch_left)) // 遥控器左侧开关状态为[下],遥控器控制
-        RemoteControlSet();
-    else if (switch_is_up(rc_compat[TEMP].rc.switch_left)) // 遥控器左侧开关状态为[上],键盘控制
-        MouseKeySet();
+    // 根据遥控器状态和比赛阶段决定控制模式
+    if (RemoteControlIsOnline())
+    {
+        if (switch_is_down(rc_compat[TEMP].rc.switch_left))      // 左开关[下]: 遥控器手动控制
+            RemoteControlSet();
+        else if (switch_is_mid(rc_compat[TEMP].rc.switch_left))  // 左开关[中]: 哨兵视觉/导航自动控制
+            SentryAutoSet();
+        else if (switch_is_up(rc_compat[TEMP].rc.switch_left))   // 左开关[上]: 键盘控制
+            MouseKeySet();
+    }
+    else if (GetRefereeData()->GameState.game_progress == 4)
+    {
+        // 赛场正式比赛阶段(遥控器已关闭): 全自动哨兵模式
+        SentryAutoSet();
+    }
 
     EmergencyHandler(); // 处理模块离线和遥控器急停等紧急情况
-
-    // 遥控器离线: 开关值被清 0(不匹配 RC_SW_UP/DOWN),两个分支都进不去,必须主动复位控制量
-    if (!RemoteControlIsOnline()) // remote_control.h:160
-    {
-        chassis_cmd_send.vx = 0;
-        chassis_cmd_send.vy = 0;
-        chassis_cmd_send.wz = 0;
-        chassis_cmd_send.chassis_mode = CHASSIS_ZERO_FORCE;
-        shoot_cmd_send.load_mode = LOAD_STOP;
-        shoot_cmd_send.friction_mode = FRICTION_OFF;
-    }
 
     // 设置视觉发送数据,还需增加加速度和角速度数据
     // VisionSetFlag(chassis_fetch_data.enemy_color,,chassis_fetch_data.bullet_speed)

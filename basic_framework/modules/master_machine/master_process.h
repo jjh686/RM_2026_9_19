@@ -4,8 +4,8 @@
 #include "bsp_usart.h"
 #include "seasky_protocol.h"
 
-#define VISION_RECV_SIZE 18u // 当前为固定值,36字节
-#define VISION_SEND_SIZE 36u
+#define VISION_RECV_SIZE 36u // 当前为固定值,36字节
+#define VISION_SEND_SIZE 48u
 
 #pragma pack(1)
 typedef enum
@@ -40,9 +40,14 @@ typedef struct
 	Fire_Mode_e fire_mode;
 	Target_State_e target_state;
 	Target_Type_e target_type;
+	uint8_t posture_cmd; // 新增: 上位机期望哨兵姿态 (1进攻, 2防御, 3移动, 4~6强化)
 
-	float pitch;
-	float yaw;
+	/* 注意: 从 pitch 开始连续 5 个 float 会被 seasky_protocol 直接 memcpy 写入 */
+	float pitch; // 云台期望 pitch
+	float yaw;   // 云台期望 yaw
+	float vx;    // 新增: 底盘导航前进速度
+	float vy;    // 新增: 底盘导航横移速度
+	float wz;    // 新增: 底盘导航旋转速度
 } Vision_Recv_s;
 
 typedef enum
@@ -75,9 +80,14 @@ typedef struct
 	Work_Mode_e work_mode;
 	Bullet_Speed_e bullet_speed;
 
-	float yaw;
-	float pitch;
-	float roll;
+	/* 从 yaw 开始连续 7 个 float 会被打包发给上位机 */
+	float yaw;            // 1. 云台/底盘 yaw 角
+	float pitch;          // 2. 云台 pitch 角
+	float roll;           // 3. 云台 roll 角
+	float current_hp;     // 4. 自身当前血量 (0x0201)
+	float remain_ammo;    // 5. 17mm允许发弹量 (0x0208)
+	float map_target_x;   // 6. 云台手小地图标点 X (0x0303)
+	float map_target_y;   // 7. 云台手小地图标点 Y (0x0303)
 } Vision_Send_s;
 #pragma pack()
 
@@ -110,5 +120,11 @@ void VisionSetFlag(Enemy_Color_e enemy_color, Work_Mode_e work_mode, Bullet_Spee
  * @param pitch
  */
 void VisionSetAltitude(float yaw, float pitch, float roll);
+
+/**
+ * @brief 判断上位机(视觉/导航)通信是否在线
+ * @return 1 在线, 0 离线
+ */
+uint8_t VisionIsOnline(void);
 
 #endif // !MASTER_PROCESS_H

@@ -205,9 +205,9 @@ static void MecanumCalculate()
  * 注意: 补偿会让慢轮电流增大, 需监控温度
  */
 #define LF_COMP   1.000f   // 左前
-#define RF_COMP   1.040f   // 右前
+#define RF_COMP   1.000f   // 右前
 #define LB_COMP   1.000f   // 左后
-#define RB_COMP   1.040f   // 右后
+#define RB_COMP   1.000f   // 右后
 
 /**
  * @brief 四轮X型全向轮正运动学
@@ -366,8 +366,8 @@ void ChassisTask()
     // 根据控制模式设定旋转速度
     switch (chassis_cmd_recv.chassis_mode)
     {
-    case CHASSIS_NO_FOLLOW: // 底盘不旋转,但维持全向机动,一般用于调整云台姿态
-        chassis_cmd_recv.wz = 0;
+    case CHASSIS_NO_FOLLOW: // 底盘维持全向机动,wz由cmd层决定(手动为0,自动导航为vision_recv_data->wz)
+        // chassis_cmd_recv.wz = 0;
         break;
     case CHASSIS_FOLLOW_GIMBAL_YAW: // 跟随云台,不单独设置pid,以误差角度平方为速度输出
         chassis_cmd_recv.wz = -1.5f * chassis_cmd_recv.offset_angle * fabsf(chassis_cmd_recv.offset_angle);
