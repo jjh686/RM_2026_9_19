@@ -26,10 +26,10 @@ static void f_Changing_Integration_Rate(PIDInstance *pid)
     if (pid->Err * pid->Iout > 0)
     {
         // 积分呈累积趋势
-        if (abs(pid->Err) <= pid->CoefB)
+        if (fabsf(pid->Err) <= pid->CoefB)
             return; // Full integral
-        if (abs(pid->Err) <= (pid->CoefA + pid->CoefB))
-            pid->ITerm *= (pid->CoefA - abs(pid->Err) + pid->CoefB) / pid->CoefA;
+        if (fabsf(pid->Err) <= (pid->CoefA + pid->CoefB))
+            pid->ITerm *= (pid->CoefA - fabsf(pid->Err) + pid->CoefB) / pid->CoefA;
         else // 最大阈值,不使用积分
             pid->ITerm = 0;
     }
@@ -40,7 +40,7 @@ static void f_Integral_Limit(PIDInstance *pid)
     static float temp_Output, temp_Iout;
     temp_Iout = pid->Iout + pid->ITerm;
     temp_Output = pid->Pout + pid->Iout + pid->Dout;
-    if (abs(temp_Output) > pid->MaxOut)
+    if (fabsf(temp_Output) > pid->MaxOut)
     {
         if (pid->Err * pid->Iout > 0) // 积分却还在累积
         {
@@ -158,7 +158,7 @@ float PIDCalculate(PIDInstance *pid, float measure, float ref)
     pid->Err = pid->Ref - pid->Measure;
 
     // 如果在死区外,则计算PID
-    if (abs(pid->Err) > pid->DeadBand)
+    if (fabsf(pid->Err) > pid->DeadBand)
     {
         // 基本的pid计算,使用位置式
         pid->Pout = pid->Kp * pid->Err;

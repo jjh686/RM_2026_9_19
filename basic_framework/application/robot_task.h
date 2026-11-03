@@ -48,8 +48,8 @@ void OSTaskInit()
     osThreadDef(robottask, StartROBOTTASK, osPriorityNormal, 0, 1024);
     robotTaskHandle = osThreadCreate(osThread(robottask), NULL);
 
-    // osThreadDef(uitask, StartUITASK, osPriorityNormal, 0, 512);
-    // uiTaskHandle = osThreadCreate(osThread(uitask), NULL);
+    osThreadDef(uitask, StartUITASK, osPriorityNormal, 0, 512);
+    uiTaskHandle = osThreadCreate(osThread(uitask), NULL);
 
     HTMotorControlInit(); // 没有注册HT电机则不会执行
 }
@@ -120,7 +120,7 @@ __attribute__((noreturn)) void StartROBOTTASK(void const *argument)
         RobotTask();
         robot_dt = DWT_GetTimeline_ms() - robot_start;
         if (robot_dt > 5)
-            LOGERROR("[freeRTOS] ROBOT core Task is being DELAY! dt = [%f]", &robot_dt);
+            LOGERROR("[freeRTOS] ROBOT core Task is being DELAY! dt = [%d]", (int)robot_dt);
         osDelay(5);
     }
 }

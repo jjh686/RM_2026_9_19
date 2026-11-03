@@ -9,9 +9,11 @@
 #include "general_def.h"
 #include "dji_motor.h"
 #include "bmi088.h"
+#include "referee_task.h"
 // bsp
 #include "bsp_dwt.h"
 #include "bsp_log.h"
+#include "stdlib.h"
 
 // 私有宏,自动将编码器转换成角度值
 #define YAW_ALIGN_ANGLE (YAW_CHASSIS_ALIGN_ECD * ECD_ANGLE_COEF_DJI) // 对齐时的角度,0-360
@@ -32,7 +34,7 @@ static Chassis_Upload_Data_s chassis_fetch_data; // 从底盘应用接收的反�
 
 static FS_RC_ctrl_t *fs_rc_data;        // SBUS 原始数据,初始化时返回
 static RC_ctrl_t rc_compat[2];          // 适配成 DBUS 语义的数据[TEMP/LAST]
-static int8_t spin_dir = 1;             // +1 逆时针 / -1 顺时针, 由 SA(CH6) 决定
+static int8_t spin_dir = 1;             // +1 逆时针 / -1 顺时针, 由 CH6 决定
 static Vision_Recv_s *vision_recv_data; // 视觉接收数据指针,初始化时返回
 // static Vision_Send_s vision_send_data;  // 视觉发送数据
 
@@ -51,30 +53,48 @@ static Robot_Status_e robot_state; // 机器人整体工作状态
 BMI088Instance *bmi088_test; // 云台IMU
 BMI088_Data_t bmi088_data;
 
-/* SBUS → DBUS 语义适配,让下方原有逻辑无需改动 */
+/* 摇杆单帧最大变化量: SBUS 70Hz 下正常操作每帧最多约 50, 800 足以覆盖极限手动 */
+#define RC_ROCKER_MAX_STEP  800
+
+/**
+ * @brief 摇杆跳变抑制: 单帧变化量超过阈值视为误码, 沿用上一帧值
+ * @param new_val 本帧从 SBUS 解析出的值
+ * @param old_val 上一帧的最终值(已过死区)
+ * @return 实际采用的值
+ */
+static int16_t clamp_rocker_step(int16_t new_val, int16_t old_val)
+{
+    int32_t diff = (int32_t)new_val - (int32_t)old_val;
+    if (diff >  RC_ROCKER_MAX_STEP) return old_val;
+    if (diff < -RC_ROCKER_MAX_STEP) return old_val;
+    return new_val;
+}
+
+/* SBUS(CH1~CH8) → DBUS 语义适配, 让 RemoteControlSet/MouseKeySet 无需改动 */
 static void FS2RC_Adapt(void)
 {
-    rc_compat[LAST] = rc_compat[TEMP];          /* 保留上一帧,供开关/按键边沿判断 */
+    rc_compat[LAST] = rc_compat[TEMP];   /* 保留上一帧, 供开关/按键边沿判断 */
 
-    rc_compat[TEMP].rc.rocker_r_ = fs_rc_data[TEMP].rc.rocker_r_;   /* CH1 → vx */
-    rc_compat[TEMP].rc.rocker_r1 = fs_rc_data[TEMP].rc.rocker_r1;   /* CH2 → vy */
-    rc_compat[TEMP].rc.rocker_l_ = fs_rc_data[TEMP].rc.rocker_l_;   /* CH4 备用 */
-    rc_compat[TEMP].rc.rocker_l1 = fs_rc_data[TEMP].rc.rocker_l1;   /* CH3 备用 */
+    /* 摇杆跳变抑制: 单帧变化超过 800 视为误码, 沿用上一帧
+     * 防止误码让 rocker_r1 瞬间归零 → vx=0 → vt 斜坡下降 → 速度骤降 */
+    rc_compat[TEMP].rc.rocker_r_  = clamp_rocker_step(fs_rc_data[TEMP].rc.rocker_r_,  rc_compat[LAST].rc.rocker_r_);
+    rc_compat[TEMP].rc.rocker_r1  = clamp_rocker_step(fs_rc_data[TEMP].rc.rocker_r1, rc_compat[LAST].rc.rocker_r1);
+    rc_compat[TEMP].rc.rocker_l_  = clamp_rocker_step(fs_rc_data[TEMP].rc.rocker_l_,  rc_compat[LAST].rc.rocker_l_);
+    rc_compat[TEMP].rc.rocker_l1  = clamp_rocker_step(fs_rc_data[TEMP].rc.rocker_l1, rc_compat[LAST].rc.rocker_l1);
 
-    /* SBUS 开关:0上/1中/2下  →  框架:UP=1/MID=3/DOWN=2 */
-    static const uint8_t sw_map[3] = { RC_SW_UP, RC_SW_MID, RC_SW_DOWN };   /* {1, 3, 2} */
-    rc_compat[TEMP].rc.switch_right = sw_map[fs_rc_data[TEMP].channel[6]];  /* CH7 */
-    rc_compat[TEMP].rc.switch_left  = sw_map[fs_rc_data[TEMP].channel[7]];  /* CH8 */
+    /* SBUS 开关: 0上/1中/2下  →  框架: RC_SW_UP=1 / RC_SW_MID=3 / RC_SW_DOWN=2 */
+    static const uint8_t sw_map[3] = { RC_SW_UP, RC_SW_MID, RC_SW_DOWN };
+    rc_compat[TEMP].rc.switch_right = sw_map[fs_rc_data[TEMP].channel[6]];  /* CH7 = SB */
+    rc_compat[TEMP].rc.switch_left  = sw_map[fs_rc_data[TEMP].channel[7]];  /* CH8 = SC */
 
-    rc_compat[TEMP].rc.dial = fs_rc_data[TEMP].rc.knob_l;                  /* CH5 → 急停 */
-    /* SA(两档,CH6) → 小陀螺方向:上档≈0 → 逆时针; 下档≈1567 → 顺时针 */
-    spin_dir = (fs_rc_data[TEMP].rc.knob_r > 700) ? -1 : 1;
+    rc_compat[TEMP].rc.dial = fs_rc_data[TEMP].rc.knob_l;                 /* CH5 左旋钮 → 急停 */
+    spin_dir = (fs_rc_data[TEMP].rc.knob_r > 400) ? -1 : 1;   // 拧到偏左(正)侧才反向
 
-    if (abs(rc_compat[TEMP].rc.rocker_l_) < 20) rc_compat[TEMP].rc.rocker_l_ = 0;
-    if (abs(rc_compat[TEMP].rc.rocker_l1) < 20) rc_compat[TEMP].rc.rocker_l1 = 0;
-    if (abs(rc_compat[TEMP].rc.rocker_r_) < 20) rc_compat[TEMP].rc.rocker_r_ = 0;
-    if (abs(rc_compat[TEMP].rc.rocker_r1) < 20) rc_compat[TEMP].rc.rocker_r1 = 0;
-
+    /* 摇杆死区, 防止中立点漂移导致底盘缓慢爬行 */
+    if (abs(rc_compat[TEMP].rc.rocker_l_) < 40) rc_compat[TEMP].rc.rocker_l_ = 0;
+    if (abs(rc_compat[TEMP].rc.rocker_l1) < 40) rc_compat[TEMP].rc.rocker_l1 = 0;
+    if (abs(rc_compat[TEMP].rc.rocker_r_) < 40) rc_compat[TEMP].rc.rocker_r_ = 0;
+    if (abs(rc_compat[TEMP].rc.rocker_r1) < 40) rc_compat[TEMP].rc.rocker_r1 = 0;
 }
 
 void RobotCMDInit()
@@ -120,7 +140,7 @@ void RobotCMDInit()
     //     },
     // };
     //bmi088_test = BMI088Register(&bmi088_config);
-   fs_rc_data = FS_RemoteControlInit(&huart3);   // 改成:W.BUS/SBUS
+    fs_rc_data = FS_RemoteControlInit(&huart3);   // FS/W.BUS SBUS 接收机
     vision_recv_data = VisionInit(&huart1); // 视觉通信串口
 
     gimbal_cmd_pub = PubRegister("gimbal_cmd", sizeof(Gimbal_Ctrl_Cmd_s));
@@ -186,37 +206,74 @@ static void RemoteControlSet()
     if (switch_is_down(rc_compat[TEMP].rc.switch_right)) // 右侧开关状态[下],底盘跟随云台
     {
         chassis_cmd_send.chassis_mode = CHASSIS_ROTATE;
-        chassis_cmd_send.wz = (float)spin_dir;           // ← 新增这一行:传方向(+1/-1)
+        chassis_cmd_send.wz = (float)spin_dir;   // ← 新增, 传方向 +1/-1
         gimbal_cmd_send.gimbal_mode = GIMBAL_GYRO_MODE;
     }
     else if (switch_is_mid(rc_compat[TEMP].rc.switch_right)) // 右侧开关状态[中],底盘和云台分离,底盘保持不转动
     {
         chassis_cmd_send.chassis_mode = CHASSIS_NO_FOLLOW;
+        chassis_cmd_send.wz = 0.0f;
         gimbal_cmd_send.gimbal_mode = GIMBAL_FREE_MODE;
     }
 
-    // 云台参数,确定云台控制数据
-    if (switch_is_mid(rc_compat[TEMP].rc.switch_left)) // 左侧开关状态为[中],视觉模式
+    else if (switch_is_up(rc_compat[TEMP].rc.switch_right))
     {
-        // 待添加,视觉会发来和目标的误差,同样将其转化为total angle的增量进行控制
-        // ...
+        chassis_cmd_send.chassis_mode = CHASSIS_ZERO_FORCE;
+        chassis_cmd_send.wz = 0.0f;
+        gimbal_cmd_send.gimbal_mode = GIMBAL_ZERO_FORCE;
     }
-    // 左侧开关状态为[下],或视觉未识别到目标,纯遥控器拨杆控制
-    if (switch_is_down(rc_compat[TEMP].rc.switch_left) || vision_recv_data->target_state == NO_TARGET)
-    { // 按照摇杆的输出大小进行角度增量,增益系数需调整
-        gimbal_cmd_send.yaw += 0.0007f * (float)rc_compat[TEMP].rc.rocker_l_;
-        gimbal_cmd_send.pitch += 0.0003f * (float)rc_compat[TEMP].rc.rocker_l1;
+
+    /* 1. 云台控制 */
+    if (switch_is_mid(rc_compat[TEMP].rc.switch_left) && VisionIsOnline())
+    {
+        // 左开关[中]且上位机在线: 视觉/导航接管
+        if (vision_recv_data->target_state != NO_TARGET)
+        {
+            gimbal_cmd_send.yaw   = vision_recv_data->yaw;
+            gimbal_cmd_send.pitch = vision_recv_data->pitch;
+        }
+        if (vision_recv_data->posture_cmd >= 1 && vision_recv_data->posture_cmd <= 6)
+        {
+            SentrySetPosture(vision_recv_data->posture_cmd); // 同步上位机期望的哨兵姿态
+        }
     }
-    // 云台软件限位
+    else if (robot_state == ROBOT_READY)
+    {
+        // 左开关[下]或视觉无目标: 遥控器摇杆控制云台
+        gimbal_cmd_send.yaw   += 0.005f * (float)rc_compat[TEMP].rc.rocker_l_;
+        gimbal_cmd_send.pitch += 0.001f * (float)rc_compat[TEMP].rc.rocker_l1;
+    }
 
-    if (gimbal_cmd_send.pitch > PITCH_MAX_ANGLE) gimbal_cmd_send.pitch = PITCH_MAX_ANGLE;
-    if (gimbal_cmd_send.pitch < PITCH_MIN_ANGLE) gimbal_cmd_send.pitch = PITCH_MIN_ANGLE;
-    if (gimbal_cmd_send.yaw > YAW_MAX_ANGLE) gimbal_cmd_send.yaw = YAW_MAX_ANGLE;
-    if (gimbal_cmd_send.yaw < YAW_MIN_ANGLE) gimbal_cmd_send.yaw = YAW_MIN_ANGLE;
+    /* 2. 底盘速度控制: 左开关[中]由上位机导航控制, 左开关[下]由遥控器摇杆控制 */
+    float ld = (float)rc_compat[TEMP].rc.dial;
+    if (ld < -660.0f) ld = -660.0f;
+    if (ld >  660.0f) ld =  660.0f;
+    float ratio       = (ld + 660.0f) / 1320.0f;   // 0 ~ 1
+    float speed_scale = 0.30f + 0.80f * ratio;     // 0.30 ~ 1.10
+    chassis_cmd_send.chassis_speed_buff = (int)(speed_scale * 100.0f);
 
-    // 底盘参数,目前没有加入小陀螺(调试似乎暂时没有必要),系数需要调整
-    chassis_cmd_send.vy = 1.6f * (float)rc_compat[TEMP].rc.rocker_r_; // _水平方向
-    chassis_cmd_send.vx = 1.6f * (float)rc_compat[TEMP].rc.rocker_r1; // 1数值方向
+    if (switch_is_mid(rc_compat[TEMP].rc.switch_left))
+    {
+        // 左开关[中]: 上位机导航模式 (若上位机离线则安全清零速度)
+        if (VisionIsOnline())
+        {
+            chassis_cmd_send.vx = vision_recv_data->vx;
+            chassis_cmd_send.vy = vision_recv_data->vy;
+            if (chassis_cmd_send.chassis_mode == CHASSIS_NO_FOLLOW)
+                chassis_cmd_send.wz = vision_recv_data->wz;
+        }
+        else
+        {
+            chassis_cmd_send.vx = 0.0f;
+            chassis_cmd_send.vy = 0.0f;
+        }
+    }
+    else
+    {
+        // 左开关[下]: 纯遥控器手动控制底盘
+        chassis_cmd_send.vx = 15.0f * speed_scale * (float)rc_compat[TEMP].rc.rocker_r1;
+        chassis_cmd_send.vy = 15.0f * speed_scale * (float)rc_compat[TEMP].rc.rocker_r_;
+    }
 
     // 发射参数
     if (switch_is_up(rc_compat[TEMP].rc.switch_right)) // 右侧开关状态[上],弹舱打开
@@ -224,18 +281,77 @@ static void RemoteControlSet()
     else
         ; // 弹舱舵机控制,待添加servo_motor模块,关闭
 
-    // 摩擦轮控制,拨轮向上打为负,向下为正
-    if (rc_compat[TEMP].rc.dial < -100) // 向上超过100,打开摩擦轮
-        shoot_cmd_send.friction_mode = FRICTION_ON;
-    else
-        shoot_cmd_send.friction_mode = FRICTION_OFF;
-    // 拨弹控制,遥控器固定为一种拨弹模式,可自行选择
-    if (rc_compat[TEMP].rc.dial < -500)
-        shoot_cmd_send.load_mode = LOAD_BURSTFIRE;
-    else
-        shoot_cmd_send.load_mode = LOAD_STOP;
+    /* LD 已改为底盘调速, 发射控件待重新分配; 暂时保持关闭 */
+    shoot_cmd_send.friction_mode = FRICTION_OFF;
+    shoot_cmd_send.load_mode = LOAD_STOP;
+
     // 射频控制,固定每秒1发,后续可以根据左侧拨轮的值大小切换射频,
     shoot_cmd_send.shoot_rate = 8;
+}
+
+/**
+ * @brief 左开关[中]: 哨兵视觉/导航自动控制模式
+ */
+static void SentryAutoSet(void)
+{
+    /* 1. 右开关仍然保留作为底盘模式/安全档位选择:
+     *    右[下]: 边小陀螺边导航移动
+     *    右[中]: 不小陀螺, 纯全向导航移动
+     *    右[上]: 零力急停
+     */
+    if (!RemoteControlIsOnline() || switch_is_down(rc_compat[TEMP].rc.switch_right))
+    {
+        chassis_cmd_send.chassis_mode = CHASSIS_ROTATE;
+        chassis_cmd_send.wz = (float)spin_dir;
+        chassis_cmd_send.chassis_speed_buff = 80;
+        gimbal_cmd_send.gimbal_mode = GIMBAL_GYRO_MODE;
+    }
+    else if (switch_is_mid(rc_compat[TEMP].rc.switch_right))
+    {
+        chassis_cmd_send.chassis_mode = CHASSIS_NO_FOLLOW;
+        gimbal_cmd_send.gimbal_mode = GIMBAL_GYRO_MODE;
+    }
+    else
+    {
+        chassis_cmd_send.chassis_mode = CHASSIS_ZERO_FORCE;
+        chassis_cmd_send.wz = 0.0f;
+        gimbal_cmd_send.gimbal_mode = GIMBAL_ZERO_FORCE;
+        return;
+    }
+
+    /* 2. 接收上位机(视觉/导航)控制指令, 若上位机离线则安全清零 */
+    if (VisionIsOnline())
+    {
+        // 底盘导航速度
+        chassis_cmd_send.vx = vision_recv_data->vx;
+        chassis_cmd_send.vy = vision_recv_data->vy;
+        if (chassis_cmd_send.chassis_mode == CHASSIS_NO_FOLLOW)
+            chassis_cmd_send.wz = vision_recv_data->wz;
+
+        // 云台自瞄角度
+        if (vision_recv_data->target_state != NO_TARGET)
+        {
+            gimbal_cmd_send.yaw   = vision_recv_data->yaw;
+            gimbal_cmd_send.pitch = vision_recv_data->pitch;
+        }
+
+        // 同步上位机期望的哨兵姿态 (1~6)
+        if (vision_recv_data->posture_cmd >= 1 && vision_recv_data->posture_cmd <= 6)
+        {
+            SentrySetPosture(vision_recv_data->posture_cmd);
+        }
+    }
+    else
+    {
+        // 上位机未连接或断线: 底盘原地停稳, 防止乱跑
+        chassis_cmd_send.vx = 0.0f;
+        chassis_cmd_send.vy = 0.0f;
+        if (chassis_cmd_send.chassis_mode == CHASSIS_NO_FOLLOW)
+            chassis_cmd_send.wz = 0.0f;
+    }
+
+    shoot_cmd_send.friction_mode = FRICTION_OFF;
+    shoot_cmd_send.load_mode = LOAD_STOP;
 }
 
 /**
@@ -244,6 +360,8 @@ static void RemoteControlSet()
  */
 static void MouseKeySet()
 {
+    chassis_cmd_send.chassis_mode = CHASSIS_NO_FOLLOW; // 键盘模式同样需要明确模式, 否则可能残留 ZERO_FORCE
+    gimbal_cmd_send.gimbal_mode = GIMBAL_GYRO_MODE;   // 云台同理, 否则可能残留 ZERO_FORCE
     chassis_cmd_send.vx = rc_compat[TEMP].key[KEY_PRESS].w * 300 - rc_compat[TEMP].key[KEY_PRESS].s * 300; // 系数待测
     chassis_cmd_send.vy = rc_compat[TEMP].key[KEY_PRESS].s * 300 - rc_compat[TEMP].key[KEY_PRESS].d * 300;
 
@@ -329,57 +447,50 @@ static void MouseKeySet()
  * @todo   后续修改为遥控器离线则电机停止(关闭遥控器急停),通过给遥控器模块添加daemon实现
  *
  */
-static void EmergencyHandler()
+static void EmergencyHandler(void)
 {
-    /* 急停触发:旋钮拧到最左(dial > 1200)才认定,且连续 3 次(≈15ms)确认,防 SBUS 抖动 */
-    static uint8_t estop_cnt    = 0;   /* 连续计数 */
-    static uint8_t estop_logged = 0;   /* 只在进入急停时打一次日志,避免刷屏 */
+    uint8_t sb = rc_compat[TEMP].rc.switch_right;
+    uint8_t in_match = (GetRefereeData()->GameState.game_progress == 4); // 正式比赛进行中
 
-    if (rc_compat[TEMP].rc.dial > 800)
-    {
-        if (estop_cnt < 5) estop_cnt++;     /* 封顶,避免溢出 */
-    }
-    else
-    {
-        estop_cnt = 0;                      /* 一旦低于阈值就清零 */
-    }
+    /* 遥控器在线且SB在中/下档，或者正式比赛进行中且遥控器已关控，才允许运行 */
+    uint8_t allow_run =
+        (RemoteControlIsOnline() && (switch_is_mid(sb) || switch_is_down(sb))) ||
+        (!RemoteControlIsOnline() && in_match);
 
-    if (estop_cnt >= 5 || robot_state == ROBOT_STOP)   /* 自锁条件保留 */
+    if (!allow_run)
     {
-        robot_state = ROBOT_STOP;
-        gimbal_cmd_send.gimbal_mode   = GIMBAL_ZERO_FORCE;
-        chassis_cmd_send.chassis_mode = CHASSIS_ZERO_FORCE;
-        shoot_cmd_send.shoot_mode     = SHOOT_OFF;
-        shoot_cmd_send.friction_mode  = FRICTION_OFF;
-        shoot_cmd_send.load_mode      = LOAD_STOP;
-
-        if (!estop_logged)                 /* ← 只在"刚进入急停"时报一次 */
-        {
+        if (robot_state != ROBOT_STOP)
             LOGERROR("[CMD] emergency stop!");
-            estop_logged = 1;
-        }
+
+        robot_state = ROBOT_STOP;
+
+        chassis_cmd_send.vx = 0.0f;
+        chassis_cmd_send.vy = 0.0f;
+        chassis_cmd_send.wz = 0.0f;
+        chassis_cmd_send.chassis_mode = CHASSIS_ZERO_FORCE;
+
+        gimbal_cmd_send.gimbal_mode = GIMBAL_ZERO_FORCE;
+
+        shoot_cmd_send.shoot_mode = SHOOT_OFF;
+        shoot_cmd_send.friction_mode = FRICTION_OFF;
+        shoot_cmd_send.load_mode = LOAD_STOP;
+        return;
     }
 
-    /* 恢复:SB 拨上档 */
-    if (switch_is_up(rc_compat[TEMP].rc.switch_right))
+    /* 在线且 SB 回到中/下档，立即解除急停 */
+    if (robot_state == ROBOT_STOP)
     {
         robot_state = ROBOT_READY;
         shoot_cmd_send.shoot_mode = SHOOT_ON;
-
-        estop_cnt = 0;                     /* ← 恢复时把计数也清掉 */
-        if (estop_logged)                  /* ← 只在恢复那一次报 */
-        {
-            LOGINFO("[CMD] reinstate, robot ready");
-            estop_logged = 0;
-        }
+        LOGINFO("[CMD] reinstate, robot ready");
     }
 }
 
 /* 机器人核心控制任务,200Hz频率运行(必须高于视觉发送频率) */
 void RobotCMDTask()
 {
-    FS2RC_Adapt(); // SBUS → DBUS 语义适配
-   // BMI088Acquire(bmi088_test,&bmi088_data) ;
+    FS2RC_Adapt(); // 必须放在所有读取遥控器数据之前
+    // BMI088Acquire(bmi088_test,&bmi088_data) ;
     // 从其他应用获取回传数据
 #ifdef ONE_BOARD
     SubGetMessage(chassis_feed_sub, (void *)&chassis_fetch_data);
@@ -391,12 +502,24 @@ void RobotCMDTask()
     SubGetMessage(gimbal_feed_sub, &gimbal_fetch_data);
 
     // 根据gimbal的反馈值计算云台和底盘正方向的夹角,不需要传参,通过static私有变量完成
-    CalcOffsetAngle();
-    // 根据遥控器左侧开关,确定当前使用的控制模式为遥控器调试还是键鼠
-    if (switch_is_down(rc_compat[TEMP].rc.switch_left)) // 遥控器左侧开关状态为[下],遥控器控制
-        RemoteControlSet();
-    else if (switch_is_up(rc_compat[TEMP].rc.switch_left)) // 遥控器左侧开关状态为[上],键盘控制
-        MouseKeySet();
+    #ifndef CHASSIS_DEBUG_NO_GIMBAL
+        CalcOffsetAngle();
+    #endif
+    // 根据遥控器状态和比赛阶段决定控制模式
+    if (RemoteControlIsOnline())
+    {
+        if (switch_is_down(rc_compat[TEMP].rc.switch_left))      // 左开关[下]: 遥控器手动控制
+            RemoteControlSet();
+        else if (switch_is_mid(rc_compat[TEMP].rc.switch_left))  // 左开关[中]: 哨兵视觉/导航自动控制
+            SentryAutoSet();
+        else if (switch_is_up(rc_compat[TEMP].rc.switch_left))   // 左开关[上]: 键盘控制
+            MouseKeySet();
+    }
+    else if (GetRefereeData()->GameState.game_progress == 4)
+    {
+        // 赛场正式比赛阶段(遥控器已关闭): 全自动哨兵模式
+        SentryAutoSet();
+    }
 
     EmergencyHandler(); // 处理模块离线和遥控器急停等紧急情况
 

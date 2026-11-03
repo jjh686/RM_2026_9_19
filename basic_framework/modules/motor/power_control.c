@@ -251,14 +251,16 @@ void PowerControl()
             if (motor_setting->speed_feedback_source == OTHER_FEED)
                 pid_measure = *motor_controller->other_speed_feedback_ptr;
             else // MOTOR_FEED
-                pid_measure = measure->speed_aps / 6.0f; // 电机的速度单位是度每秒,转换为rpm
+                pid_measure = measure->speed_aps; // 速度环统一 °/s, 与 pid_ref 同量纲
             // 更新pid_ref进入下一个环
             pid_ref = PIDCalculate(&motor_controller->speed_PID, pid_measure, pid_ref);
             initial_torque[i] = pid_ref;
             power_control_out[i] = pid_ref;
+            /* 功率模型的 K1/K2/POWER_COEF 是按 rpm 拟合的, 单独换算 */
+            const float speed_rpm = pid_measure / RPM_2_ANGLE_PER_SEC;
             A = K1[i] * initial_torque[i] * initial_torque[i];
-            B = K2[i] * pid_measure * pid_measure;
-            C = POWER_COEF * pid_measure * initial_torque[i] * TORQUE_COEF;
+            B = K2[i] * speed_rpm * speed_rpm;
+            C = POWER_COEF * speed_rpm * initial_torque[i] * TORQUE_COEF;
             initial_give_power[i] = A + B + C + constant[i];
         }
 

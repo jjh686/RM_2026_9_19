@@ -27,6 +27,9 @@
 #define HALF_WHEEL_BASE (WHEEL_BASE / 2.0f)     // 半轴距
 #define HALF_TRACK_WIDTH (TRACK_WIDTH / 2.0f)   // 半轮距
 #define PERIMETER_WHEEL (RADIUS_WHEEL * 2 * PI) // 轮子周长
+/* 参考值斜坡限速, 防止指令阶跃导致电流打满 */
+#define VT_SLEW_APS_PER_S 50000.0f   // 200Hz 下每周期 500 aps
+
 
 /* 底盘应用包含的模块和信息存储,底盘是单例模式,因此不需要为底盘建立单独的结构体 */
 #ifdef CHASSIS_BOARD // 如果是底盘板,使用板载IMU获取底盘转动角速度
@@ -36,6 +39,7 @@ static CANCommInstance *chasiss_can_comm; // 双板通信CAN comm
 attitude_t *Chassis_IMU_data;
 #endif // CHASSIS_BOARD
 #ifdef ONE_BOARD
+
 static Publisher_t *chassis_pub;                    // 用于发布底盘的数据
 static Subscriber_t *chassis_sub;                   // 用于订阅底盘的控制命令
 #endif                                              // !ONE_BOARD
@@ -49,20 +53,38 @@ static Referee_Interactive_info_t ui_data; // UI数据，将底盘中的数据�
 static SuperCapInstance *cap;                                       // 超级电容
 static DJIMotorInstance *motor_lf, *motor_rf, *motor_lb, *motor_rb; // left right forward back
 
-/* ---- 调试观察用全局变量(非指针,供 EmberProbe 采样,不参与任何控制逻辑) ---- */
-volatile float dbg_lf_rpm, dbg_rf_rpm, dbg_lb_rpm, dbg_rb_rpm;  // 实测转速 rpm
-volatile float dbg_lf_ref, dbg_rf_ref, dbg_lb_ref, dbg_rb_ref;  // 设定转速 rpm
-volatile float dbg_lf_cur, dbg_rf_cur, dbg_lb_cur, dbg_rb_cur;  // 实测电流
-volatile float dbg_lf_ecd, dbg_rf_ecd, dbg_lb_ecd, dbg_rb_ecd;  // 单圈编码器
-volatile float dbg_lf_cnt, dbg_rf_cnt, dbg_lb_cnt, dbg_rb_cnt;  // 反馈帧计数
-volatile float dbg_lf_temp, dbg_rf_temp, dbg_lb_temp, dbg_rb_temp;  // 温度示例
-
 /* 用于自旋变速策略的时间变量 */
 // static float t;
 
 /* 私有函数计算的中介变量,设为静态避免参数传递的开销 */
 static float chassis_vx, chassis_vy;                      // 将云台系的速度投影到底盘
 static float vt_lf, vt_rf, vt_lb, vt_rb;                  // 底盘速度解算后的临时输出,待进行限幅
+
+static float vt_cmd_lf, vt_cmd_rf, vt_cmd_lb, vt_cmd_rb;  // 斜坡限速后的实际下发值
+
+static float slew_limit(float target, float current, float max_step)
+{
+    float d = target - current;
+    if (d > max_step)  return current + max_step;
+    if (d < -max_step) return current - max_step;
+    return target;
+}
+
+/* ---------------- 调试镜像变量 ----------------
+ * 仅为方便调试器/波形观察而存在, 不参与任何控制逻辑.
+ * 电机实例在堆上, 路径形如 chassis.c::motor_lf->measure.speed_aps 又长又不便输入,
+ * 因此每周期把关心的量复制到这几个全局标量里, 之后直接看 dbg_* 即可.
+ * 单位: ref/spd 均为转子度/秒(aps), 与 pid_ref / speed_aps 完全一致.
+ * 正式比赛若要清理, 删掉本段与 ChassisTask 末尾的同步语句即可.
+ */
+volatile float dbg_ref_lf, dbg_spd_lf;                    // 左前 目标/实际
+volatile float dbg_ref_rf, dbg_spd_rf;                    // 右前 目标/实际
+volatile float dbg_ref_lb, dbg_spd_lb;                    // 左后 目标/实际
+volatile float dbg_ref_rb, dbg_spd_rb;                    // 右后 目标/实际
+volatile float dbg_out_lf;                                // 左前 速度环输出(电流设定值)
+
+/* 底盘实际速度(m/s, deg/s), 由 EstimateSpeed 逆解算得到 */
+volatile float dbg_real_vx, dbg_real_vy, dbg_real_wz;
 
 void ChassisInit()
 {
@@ -71,13 +93,12 @@ void ChassisInit()
         .can_init_config.can_handle = &hcan1,
         .controller_param_init_config = {
             .speed_PID = {
-                .Kp = 8.0f, // 8.0f
-                .Ki = 0.2f,   // 0.2f
-                .Kd = 0,   // 0
-                .IntegralLimit = 3000,
+                .Kp = 3.0f, 
+                .Ki = 0.3f,   
+                .Kd = 0,   
+                .IntegralLimit = 700,
                 .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
                 .MaxOut = 15000,
-                .Output_LPF_RC = 0.3,
             },
         },
         .controller_setting_init_config = {
@@ -91,7 +112,7 @@ void ChassisInit()
     //  @todo: 当前还没有设置电机的正反转,仍然需要手动添加reference的正负号,需要电机module的支持,待修改.
     //使用功率控制的电机需要使用PowerControlInit()函数初始化,因为电机的控制方式不同
     chassis_motor_config.can_init_config.tx_id = 1;
-    chassis_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_REVERSE;
+    chassis_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_NORMAL;
     motor_lf = PowerControlInit(&chassis_motor_config);
 
     chassis_motor_config.can_init_config.tx_id = 2;
@@ -103,14 +124,14 @@ void ChassisInit()
     motor_lb = PowerControlInit(&chassis_motor_config);
 
     chassis_motor_config.can_init_config.tx_id = 3;
-    chassis_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_REVERSE;
+    chassis_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_NORMAL;
     motor_rb = PowerControlInit(&chassis_motor_config);
 
     referee_data = UITaskInit(&huart6, &ui_data); // 裁判系统初始化,会同时初始化UI
 
 /* Buffer环暂未测试，逻辑是计算期望buffer与实际buffer的差值，转换为冗余的功率，todo：输入给功率控制部分，待完善 */
     PID_Init_Config_s Buffer_pid_conf = {
-        .Kp = 0.1,
+        .Kp = 0.1f,
         .Ki = 0,
         .Kd = 0,
         .IntegralLimit = 1000,
@@ -148,6 +169,7 @@ void ChassisInit()
 #endif // ONE_BOARD
 }
 
+#if defined(CHASSIS_MECANUM)
 #define LF_CENTER ((HALF_TRACK_WIDTH + CENTER_GIMBAL_OFFSET_X + HALF_WHEEL_BASE - CENTER_GIMBAL_OFFSET_Y) * DEGREE_2_RAD)
 #define RF_CENTER ((HALF_TRACK_WIDTH - CENTER_GIMBAL_OFFSET_X + HALF_WHEEL_BASE - CENTER_GIMBAL_OFFSET_Y) * DEGREE_2_RAD)
 #define LB_CENTER ((HALF_TRACK_WIDTH + CENTER_GIMBAL_OFFSET_X + HALF_WHEEL_BASE + CENTER_GIMBAL_OFFSET_Y) * DEGREE_2_RAD)
@@ -158,11 +180,60 @@ void ChassisInit()
  */
 static void MecanumCalculate()
 {
-    vt_lf = -chassis_vx - chassis_vy + chassis_cmd_recv.wz * LF_CENTER;
+    vt_lf = -chassis_vx - chassis_vy - chassis_cmd_recv.wz * LF_CENTER;
     vt_rf = -chassis_vx + chassis_vy - chassis_cmd_recv.wz * RF_CENTER;
     vt_lb = chassis_vx - chassis_vy - chassis_cmd_recv.wz * LB_CENTER;
-    vt_rb = chassis_vx + chassis_vy + chassis_cmd_recv.wz * RB_CENTER;
+    vt_rb = chassis_vx + chassis_vy - chassis_cmd_recv.wz * RB_CENTER;
 }
+
+#else /* ---------------- CHASSIS_OMNI: 四轮X型全向轮 ---------------- */
+
+/* 轮轴指向底盘中心, 驱动方向为切向
+ * a=半轴距 b=半轮距 r0=轮心到旋转中心距离
+ * 350/300 时: OMNI_KX=0.6508  OMNI_KY=0.7593  OMNI_KW=4.023
+ */
+#define OMNI_A  (WHEEL_BASE / 2.0f)
+#define OMNI_B  (TRACK_WIDTH / 2.0f)
+#define OMNI_R0 (sqrtf(OMNI_A * OMNI_A + OMNI_B * OMNI_B))
+#define OMNI_KX (OMNI_B / OMNI_R0)
+#define OMNI_KY (OMNI_A / OMNI_R0)
+#define OMNI_KW (OMNI_R0 * DEGREE_2_RAD)
+
+/* ---------------- 单轮增益补偿 ----------------
+ * 落地实测: motor_rf(右前) 和 motor_lb(左后) 速度偏低
+ * 系数 = 最快轮速度 / 该轮速度, >1 表示提升该轮目标值
+ * 注意: 补偿会让慢轮电流增大, 需监控温度
+ */
+#define LF_COMP   1.000f   // 左前
+#define RF_COMP   1.000f   // 右前
+#define LB_COMP   1.000f   // 左后
+#define RB_COMP   1.000f   // 右后
+
+/**
+ * @brief 四轮X型全向轮正运动学
+ *        期望: vx>0 → [+ - + -] ; vy>0 → [+ + - -] ; wz>0 → [+ + + +]
+ */
+static void OmniCalculate()
+{
+    const float w = chassis_cmd_recv.wz * OMNI_KW;
+
+    vt_lf =  OMNI_KX * chassis_vx + OMNI_KY * chassis_vy + w;
+    vt_rf = -OMNI_KX * chassis_vx + OMNI_KY * chassis_vy + w;
+    vt_lb =  OMNI_KX * chassis_vx - OMNI_KY * chassis_vy + w;
+    vt_rb = -OMNI_KX * chassis_vx - OMNI_KY * chassis_vy + w;
+
+    /* 只在接近直行时补偿, 避免影响横移 */
+    if (fabsf(chassis_vy) < 100.0f)
+    {
+        vt_lf *= LF_COMP;
+        vt_rf *= RF_COMP;
+        vt_lb *= LB_COMP;
+        vt_rb *= RB_COMP;
+    }
+
+}
+
+#endif /* CHASSIS_OMNI */
 
 /**
  * @brief 根据裁判系统和电容剩余容量对输出进行限制并设置电机参考值
@@ -174,11 +245,50 @@ static void LimitChassisOutput()
     // referee_data->PowerHeatData.chassis_power;
     // referee_data->PowerHeatData.chassis_power_buffer;
 
+        /* ===== 急停/零力模式: 直接停, 严禁后面的逻辑重新使能 ===== */
+    if (chassis_cmd_recv.chassis_mode == CHASSIS_ZERO_FORCE)
+    {
+        DJIMotorSetRef(motor_lf, 0.0f);
+        DJIMotorSetRef(motor_rf, 0.0f);
+        DJIMotorSetRef(motor_lb, 0.0f);
+        DJIMotorSetRef(motor_rb, 0.0f);
+
+        DJIMotorStop(motor_lf);
+        DJIMotorStop(motor_rf);
+        DJIMotorStop(motor_lb);
+        DJIMotorStop(motor_rb);
+
+        /* 斜坡状态清零, 避免恢复瞬间冲一下 */
+        vt_cmd_lf = 0.0f;
+        vt_cmd_rf = 0.0f;
+        vt_cmd_lb = 0.0f;
+        vt_cmd_rb = 0.0f;
+        return;
+    }
+
+    /* 参考值斜坡限速: 防止 ref 阶跃(摇杆瞬断/离线/急停)导致电流打满 */
+    const float max_step = VT_SLEW_APS_PER_S * 0.005f;   // 200Hz → 5ms
+
+    vt_cmd_lf = slew_limit(vt_lf, vt_cmd_lf, max_step);
+    vt_cmd_rf = slew_limit(vt_rf, vt_cmd_rf, max_step);
+    vt_cmd_lb = slew_limit(vt_lb, vt_cmd_lb, max_step);
+    vt_cmd_rb = slew_limit(vt_rb, vt_cmd_rb, max_step);
+
+    /* 参考值为 0 时清积分 + 停电机, 彻底消除零速抖动 */
+    if (fabsf(vt_cmd_lf) < 1.0f) { motor_lf->motor_controller.speed_PID.Iout = 0.0f; DJIMotorStop(motor_lf); }
+    else                          { DJIMotorEnable(motor_lf); }
+    if (fabsf(vt_cmd_rf) < 1.0f) { motor_rf->motor_controller.speed_PID.Iout = 0.0f; DJIMotorStop(motor_rf); }
+    else                          { DJIMotorEnable(motor_rf); }
+    if (fabsf(vt_cmd_lb) < 1.0f) { motor_lb->motor_controller.speed_PID.Iout = 0.0f; DJIMotorStop(motor_lb); }
+    else                          { DJIMotorEnable(motor_lb); }
+    if (fabsf(vt_cmd_rb) < 1.0f) { motor_rb->motor_controller.speed_PID.Iout = 0.0f; DJIMotorStop(motor_rb); }
+    else                          { DJIMotorEnable(motor_rb); }
+    
     // 完成功率限制后进行电机参考输入设定
-    DJIMotorSetRef(motor_lf, vt_lf);
-    DJIMotorSetRef(motor_rf, vt_rf);
-    DJIMotorSetRef(motor_lb, vt_lb);
-    DJIMotorSetRef(motor_rb, vt_rb);
+    DJIMotorSetRef(motor_lf, vt_cmd_lf);
+    DJIMotorSetRef(motor_rf, vt_cmd_rf);
+    DJIMotorSetRef(motor_lb, vt_cmd_lb);
+    DJIMotorSetRef(motor_rb, vt_cmd_rb);
 }
 
 /**
@@ -188,9 +298,29 @@ static void LimitChassisOutput()
  */
 static void EstimateSpeed()
 {
-    // 根据电机速度和陀螺仪的角速度进行解算,还可以利用加速度计判断是否打滑(如果有)
-    // chassis_feedback_data.vx vy wz =
-    //  ...
+#if defined(CHASSIS_OMNI)
+    const float lf = motor_lf->measure.speed_aps;
+    const float rf = motor_rf->measure.speed_aps;
+    const float lb = motor_lb->measure.speed_aps;
+    const float rb = motor_rb->measure.speed_aps;
+
+    /* 与 OmniCalculate 严格对应的伪逆 (单位: 转子 aps) */
+    const float vx_aps = ( lf - rf + lb - rb) * (1.0f / (4.0f * OMNI_KX));
+    const float vy_aps = ( lf + rf - lb - rb) * (1.0f / (4.0f * OMNI_KY));
+    const float wz_aps = ( lf + rf + lb + rb) * (1.0f / (4.0f * OMNI_KW));
+
+    /* aps → m/s: /6→rpm转子, /减速比→rpm轮, ×2πR/60→m/s */
+    const float aps_2_mps = PI2 * (RADIUS_WHEEL / 1000.0f) /
+                            (RPM_2_ANGLE_PER_SEC * REDUCTION_RATIO_WHEEL * 60.0f);
+
+    chassis_feedback_data.real_vx = vx_aps * OMNI_KX * aps_2_mps;
+    chassis_feedback_data.real_vy = vy_aps * OMNI_KY * aps_2_mps;
+    /* wz 不能复用伪单位 wz_aps, 直接用平均轮速换算: ω = v_wheel / r0 */
+    chassis_feedback_data.real_wz = (lf + rf + lb + rb) * 0.25f * aps_2_mps /
+                                    (OMNI_R0 / 1000.0f) * RAD_2_DEGREE;
+#else
+    // 麦轮逆解待补
+#endif
 }
 
 /* 机器人底盘控制核心任务 */
@@ -205,9 +335,19 @@ void ChassisTask()
     chassis_cmd_recv = *(Chassis_Ctrl_Cmd_s *)CANCommGet(chasiss_can_comm);
 #endif // CHASSIS_BOARD
 
-    // 台架调试:未接裁判系统时该值为0,功率缩放会把输出乘成0,临时固定为60W,接裁判系统后恢复原句
-    SetPowerLimit(120.0f);
-    // SetPowerLimit(referee_data->GameRobotState.chassis_power_limit);//设置功率限制
+#if defined(CHASSIS_TEST_FORWARD)
+    // 台架测试: 强制固定速度前进, 覆盖遥控器/离线保护的命令
+    chassis_cmd_recv.vx = 0;
+    chassis_cmd_recv.vy = 0;
+    chassis_cmd_recv.wz = 0;
+    chassis_cmd_recv.offset_angle = 0;
+    chassis_cmd_recv.chassis_mode = CHASSIS_NO_FOLLOW; // 避免落到 ZERO_FORCE 分支停电机
+#endif
+
+    // 未接裁判系统时 chassis_power_limit 为 0,会把功率缩放成 0 导致底盘不动
+    float power_limit = referee_data->GameRobotState.chassis_power_limit;
+    SetPowerLimit(power_limit > 1.0f ? power_limit : 60.0f);
+
     if (chassis_cmd_recv.chassis_mode == CHASSIS_ZERO_FORCE)
     { // 如果出现重要模块离线或遥控器设置为急停,让电机停止
         DJIMotorStop(motor_lf);
@@ -226,21 +366,23 @@ void ChassisTask()
     // 根据控制模式设定旋转速度
     switch (chassis_cmd_recv.chassis_mode)
     {
-    case CHASSIS_NO_FOLLOW: // 底盘不旋转,但维持全向机动,一般用于调整云台姿态
-        chassis_cmd_recv.wz = 0;
+    case CHASSIS_NO_FOLLOW: // 底盘维持全向机动,wz由cmd层决定(手动为0,自动导航为vision_recv_data->wz)
+        // chassis_cmd_recv.wz = 0;
         break;
     case CHASSIS_FOLLOW_GIMBAL_YAW: // 跟随云台,不单独设置pid,以误差角度平方为速度输出
-        chassis_cmd_recv.wz = -1.5f * chassis_cmd_recv.offset_angle * abs(chassis_cmd_recv.offset_angle);
+        chassis_cmd_recv.wz = -1.5f * chassis_cmd_recv.offset_angle * fabsf(chassis_cmd_recv.offset_angle);
         break;
-    case CHASSIS_ROTATE: // 自旋,幅值固定,方向来自命令符号
-        chassis_cmd_recv.wz = (chassis_cmd_recv.wz < 0.0f) ? -100.0f : 100.0f;
+    case CHASSIS_ROTATE: // 自旋, 幅值随 LD 倍率变化, 方向来自命令符号
+    {
+        /* 满倍率 1000 aps; 最低保 200 防止自旋过慢观察不到 */
+        float amp = 1000.0f * ((float)chassis_cmd_recv.chassis_speed_buff * 0.01f);
+        if (amp < 400.0f) amp = 400.0f;
+        chassis_cmd_recv.wz = (chassis_cmd_recv.wz < 0.0f) ? -amp : amp;
         break;
+    }
     default:
         break;
     }
-
-    /* 无云台阶段:忽略云台夹角(云台未接入时 CalcOffsetAngle 会算出假值) */
-    chassis_cmd_recv.offset_angle = 0;
 
     // 根据云台和底盘的角度offset将控制量映射到底盘坐标系上
     // 底盘逆时针旋转为角度正方向;云台命令的方向以云台指向的方向为x,采用右手系(x指向正北时y在正东)
@@ -251,7 +393,11 @@ void ChassisTask()
     chassis_vy = chassis_cmd_recv.vx * sin_theta + chassis_cmd_recv.vy * cos_theta;
 
     // 根据控制模式进行正运动学解算,计算底盘输出
-    MecanumCalculate();
+    #if defined(CHASSIS_OMNI)
+        OmniCalculate();
+    #else
+        MecanumCalculate();
+    #endif
 
     // 根据裁判系统的反馈数据和电容数据对输出限幅并设定闭环参考值
     LimitChassisOutput();
@@ -259,43 +405,26 @@ void ChassisTask()
     // 根据电机的反馈速度和IMU(如果有)计算真实速度
     EstimateSpeed();
 
+    // 同步调试镜像变量(不影响控制, 供波形观察)
+    dbg_ref_lf = motor_lf->motor_controller.pid_ref;
+    dbg_spd_lf = motor_lf->measure.speed_aps;
+    dbg_out_lf = motor_lf->motor_controller.speed_PID.Output;
+    dbg_ref_rf = motor_rf->motor_controller.pid_ref;
+    dbg_spd_rf = motor_rf->measure.speed_aps;
+    dbg_ref_lb = motor_lb->motor_controller.pid_ref;
+    dbg_spd_lb = motor_lb->measure.speed_aps;
+    dbg_ref_rb = motor_rb->motor_controller.pid_ref;
+    dbg_spd_rb = motor_rb->measure.speed_aps;
+    dbg_real_vx = chassis_feedback_data.real_vx;
+    dbg_real_vy = chassis_feedback_data.real_vy;
+    dbg_real_wz = chassis_feedback_data.real_wz;
+
     // // 获取裁判系统数据   建议将裁判系统与底盘分离，所以此处数据应使用消息中心发送
     // // 我方颜色id小于7是红色,大于7是蓝色,注意这里发送的是对方的颜色, 0:blue , 1:red
     // chassis_feedback_data.enemy_color = referee_data->GameRobotState.robot_id > 7 ? 1 : 0;
     // // 当前只做了17mm热量的数据获取,后续根据robot_def中的宏切换双枪管和英雄42mm的情况
     // chassis_feedback_data.bullet_speed = referee_data->GameRobotState.shooter_id1_17mm_speed_limit;
     // chassis_feedback_data.rest_heat = referee_data->PowerHeatData.shooter_heat0;
-
-    /* ---- 调试镜像,只读电机状态,不改变任何控制量 ---- */
-    dbg_lf_rpm = motor_lf->measure.speed_aps / 6.0f;   // deg/s → rpm
-    dbg_rf_rpm = motor_rf->measure.speed_aps / 6.0f;
-    dbg_lb_rpm = motor_lb->measure.speed_aps / 6.0f;
-    dbg_rb_rpm = motor_rb->measure.speed_aps / 6.0f;
-
-    dbg_lf_ref = motor_lf->motor_controller.pid_ref;   // 设定值,单位本来就是 rpm
-    dbg_rf_ref = motor_rf->motor_controller.pid_ref;
-    dbg_lb_ref = motor_lb->motor_controller.pid_ref;
-    dbg_rb_ref = motor_rb->motor_controller.pid_ref;
-
-    dbg_lf_cur = (float)motor_lf->measure.real_current; // int16_t → float
-    dbg_rf_cur = (float)motor_rf->measure.real_current;
-    dbg_lb_cur = (float)motor_lb->measure.real_current;
-    dbg_rb_cur = (float)motor_rb->measure.real_current;
-
-    dbg_lf_ecd = (float)motor_lf->measure.ecd;
-    dbg_rf_ecd = (float)motor_rf->measure.ecd;
-    dbg_lb_ecd = (float)motor_lb->measure.ecd;
-    dbg_rb_ecd = (float)motor_rb->measure.ecd;
-
-    dbg_lf_cnt = (float)motor_lf->feed_cnt;            // 只涨说明反馈正常
-    dbg_rf_cnt = (float)motor_rf->feed_cnt;
-    dbg_lb_cnt = (float)motor_lb->feed_cnt;
-    dbg_rb_cnt = (float)motor_rb->feed_cnt;
-
-    dbg_lf_temp = (float)motor_lf->measure.temperature;
-    dbg_rf_temp = (float)motor_rf->measure.temperature;
-    dbg_lb_temp = (float)motor_lb->measure.temperature;
-    dbg_rb_temp = (float)motor_rb->measure.temperature;
 
     // 推送反馈消息
 #ifdef ONE_BOARD

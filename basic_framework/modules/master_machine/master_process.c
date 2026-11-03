@@ -13,6 +13,7 @@
 #include "daemon.h"
 #include "bsp_log.h"
 #include "robot_def.h"
+#include "rm_referee.h"
 
 static Vision_Recv_s recv_data;
 static Vision_Send_s send_data;
@@ -30,6 +31,68 @@ void VisionSetAltitude(float yaw, float pitch, float roll)
     send_data.yaw = yaw;
     send_data.pitch = pitch;
     send_data.roll = roll;
+}
+
+uint8_t VisionIsOnline(void)
+{
+    return DaemonIsOnline(vision_daemon_instance);
+}
+
+/**
+ * @brief 解析上位机发来的 16 位 flag_register
+ *        低8位: bit0-1 fire_mode, bit2-3 target_state, bit4-7 posture_cmd(1~6)
+ *        高8位: target_type
+ */
+static void ResolveVisionFlag(uint16_t flag_register)
+{
+    recv_data.fire_mode    = (Fire_Mode_e)(flag_register & 0x03);
+    recv_data.target_state = (Target_State_e)((flag_register >> 2) & 0x03);
+    recv_data.posture_cmd  = (uint8_t)((flag_register >> 4) & 0x0F);
+    recv_data.target_type  = (Target_Type_e)((flag_register >> 8) & 0xFF);
+}
+
+/**
+ * @brief 将2027裁判系统关键状态打包进 VisionSend 的 flag_register 和 float 数组
+ * @return 组装好的 16 位 flag_register:
+ *         bit 0-1: 敌方颜色 (0未知, 1蓝, 2红)
+ *         bit 2-5: 比赛阶段 game_progress (4为正式比赛中)
+ *         bit 6:   哨兵是否处于脱战状态 (0x020D)
+ *         bit 7:   是否踩在己方补给区 RFID (0x0209 bit0)
+ *         bit 8-10: RMUL 고地/中央控制区 RFID 状态 (0x0209 bit11-13)
+ *         bit 11-12: RMUL 中央控制区归属 (0中立, 1己方, 2对方, 来自0x0101 event_data_2 bit26-27)
+ *         bit 13-15: 哨兵当前实际姿态 (1进攻, 2防御, 3移动, 来自0x020D)
+ */
+static uint16_t PackRefereeToVision(void)
+{
+    referee_info_t *ref = GetRefereeData();
+    uint16_t flag = 0;
+
+    // 1. 根据本机ID判断敌方颜色 (本机1~11红方则打蓝=1; 本机>100蓝方则打红=2)
+    uint8_t my_id = ref->GameRobotState.robot_id;
+    uint8_t enemy_color = (my_id == 0) ? COLOR_NONE : ((my_id > 100) ? COLOR_RED : COLOR_BLUE);
+
+    uint8_t progress     = ref->GameState.game_progress & 0x0F;
+    uint8_t out_combat   = (ref->SentryInfo.sentry_info_2 >> 0) & 0x01;
+    uint8_t rfid_supply  = (ref->RFIDdata.rfid_status >> 0) & 0x01;
+    uint8_t rfid_zones   = (ref->RFIDdata.rfid_status >> 11) & 0x07;
+    uint8_t center_owner = (ref->EventData.event_data_2 >> 26) & 0x03;
+    uint8_t cur_posture  = (ref->SentryInfo.sentry_info_2 >> 12) & 0x03;
+
+    flag |= (enemy_color & 0x03) << 0;
+    flag |= (progress    & 0x0F) << 2;
+    flag |= (out_combat  & 0x01) << 6;
+    flag |= (rfid_supply & 0x01) << 7;
+    flag |= (rfid_zones  & 0x07) << 8;
+    flag |= (center_owner & 0x03) << 11;
+    flag |= (cur_posture & 0x07) << 13;
+
+    // 2. 填充连续 float 数组
+    send_data.current_hp   = (float)ref->GameRobotState.current_HP;
+    send_data.remain_ammo  = (float)ref->AllowanceData.projectile_allowance_17mm;
+    send_data.map_target_x = ref->MapData.target_position_x;
+    send_data.map_target_y = ref->MapData.target_position_y;
+
+    return flag;
 }
 
 /**
@@ -61,9 +124,11 @@ static USARTInstance *vision_usart_instance;
 static void DecodeVision()
 {
     uint16_t flag_register;
-    DaemonReload(vision_daemon_instance); // 喂狗
-    get_protocol_info(vision_usart_instance->recv_buff, &flag_register, (uint8_t *)&recv_data.pitch);
-    // TODO: code to resolve flag_register;
+    if (get_protocol_info(vision_usart_instance->recv_buff, &flag_register, (uint8_t *)&recv_data.pitch) != 0)
+    {
+        DaemonReload(vision_daemon_instance); // 仅当CRC校验通过时喂狗
+        ResolveVisionFlag(flag_register);
+    }
 }
 
 Vision_Recv_s *VisionInit(UART_HandleTypeDef *_handle)
@@ -99,9 +164,9 @@ void VisionSend()
     static uint8_t send_buff[VISION_SEND_SIZE];
     static uint16_t tx_len;
     // TODO: code to set flag_register
-    flag_register = 30 << 8 | 0b00000001;
+    flag_register = PackRefereeToVision();
     // 将数据转化为seasky协议的数据包
-    get_protocol_send_data(0x02, flag_register, &send_data.yaw, 3, send_buff, &tx_len);
+    get_protocol_send_data(0x02, flag_register, &send_data.yaw, 7, send_buff, &tx_len);
     USARTSend(vision_usart_instance, send_buff, tx_len, USART_TRANSFER_DMA); // 和视觉通信使用IT,防止和接收使用的DMA冲突
     // 此处为HAL设计的缺陷,DMASTOP会停止发送和接收,导致再也无法进入接收中断.
     // 也可在发送完成中断中重新启动DMA接收,但较为复杂.因此,此处使用IT发送.
@@ -117,9 +182,13 @@ static uint8_t *vis_recv_buff;
 
 static void DecodeVision(uint16_t recv_len)
 {
+    UNUSED(recv_len);
     uint16_t flag_register;
-    get_protocol_info(vis_recv_buff, &flag_register, (uint8_t *)&recv_data.pitch);
-    // TODO: code to resolve flag_register;
+    if (get_protocol_info(vis_recv_buff, &flag_register, (uint8_t *)&recv_data.pitch) != 0)
+    {
+        DaemonReload(vision_daemon_instance); // 修复: USB收到合法数据包后喂狗
+        ResolveVisionFlag(flag_register);
+    }
 }
 
 /* 视觉通信初始化 */
@@ -146,9 +215,9 @@ void VisionSend()
     static uint8_t send_buff[VISION_SEND_SIZE];
     static uint16_t tx_len;
     // TODO: code to set flag_register
-    flag_register = 30 << 8 | 0b00000001;
+    flag_register = PackRefereeToVision();
     // 将数据转化为seasky协议的数据包
-    get_protocol_send_data(0x02, flag_register, &send_data.yaw, 3, send_buff, &tx_len);
+    get_protocol_send_data(0x02, flag_register, &send_data.yaw, 7, send_buff, &tx_len);
     USBTransmit(send_buff, tx_len);
 }
 

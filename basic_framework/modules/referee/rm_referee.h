@@ -43,6 +43,8 @@ typedef struct
 
 	ext_projectile_allowance_t AllowanceData;              // 0x0208
 	ext_rfid_status_t RFIDdata;                            // 0x0209
+	ext_ground_robot_position_t GroundRobotPos;            // 0x020B (新增: 己方地面机器人位置)
+	ext_sentry_info_t SentryInfo;                          // 0x020D (新增: 哨兵自主决策信息同步)
 	ext_map_command_t MapData;							   // 0x0303
 
 	// 自定义交互数据的接收
@@ -103,5 +105,7 @@ referee_info_t *RefereeInit(UART_HandleTypeDef *referee_usart_handle);
  * @param tx_len 发送长度
  */
 void RefereeSend(uint8_t *send, uint16_t tx_len);
+void RefereeSendSentryCmd(sentry_cmd_t cmd);
+referee_info_t *GetRefereeData(void);
 
 #endif // !REFEREE_H
