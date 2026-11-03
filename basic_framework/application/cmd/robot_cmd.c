@@ -240,9 +240,14 @@ static void RemoteControlSet()
     else if (robot_state == ROBOT_READY)
     {
         // 左开关[下]或视觉无目标: 遥控器摇杆控制云台
-        gimbal_cmd_send.yaw   += 0.005f * (float)rc_compat[TEMP].rc.rocker_l_;
-        gimbal_cmd_send.pitch += 0.001f * (float)rc_compat[TEMP].rc.rocker_l1;
+        gimbal_cmd_send.yaw   += 0.0007f * (float)rc_compat[TEMP].rc.rocker_l_;   // 0.005 → 0.0007
+        gimbal_cmd_send.pitch += 0.0003f * (float)rc_compat[TEMP].rc.rocker_l1;   // 0.001 → 0.0003
     }
+
+    if (gimbal_cmd_send.pitch > PITCH_MAX_ANGLE) gimbal_cmd_send.pitch = PITCH_MAX_ANGLE;
+    if (gimbal_cmd_send.pitch < PITCH_MIN_ANGLE) gimbal_cmd_send.pitch = PITCH_MIN_ANGLE;
+    if (gimbal_cmd_send.yaw   > YAW_MAX_ANGLE)   gimbal_cmd_send.yaw   = YAW_MAX_ANGLE;
+    if (gimbal_cmd_send.yaw   < YAW_MIN_ANGLE)   gimbal_cmd_send.yaw   = YAW_MIN_ANGLE;
 
     /* 2. 底盘速度控制: 左开关[中]由上位机导航控制, 左开关[下]由遥控器摇杆控制 */
     float ld = (float)rc_compat[TEMP].rc.dial;
