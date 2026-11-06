@@ -72,21 +72,21 @@ void GimbalInit()
         },
         .controller_param_init_config = {
             .angle_PID = {
-                .Kp = 8, 
+                .Kp = 10, 
                 .Ki = 0.05f,
                 .Kd = 0,
-                .DeadBand = 1.0f,    // 新增
+                .DeadBand = 0.0f,    // 新增
                 .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
                 .IntegralLimit = 100,
                 .MaxOut = 300,
             },
             .speed_PID = {
-                .Kp = 80,  // 80
+                .Kp = 70,  // 70
                 .Ki = 0, // 0
                 .Kd = 0,   // 0
                 .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
                 .IntegralLimit = 2500,
-                .MaxOut = 2000,
+                .MaxOut = 8000,
                 .Output_LPF_RC = 0.3,
             },
             .other_angle_feedback_ptr = &gimba_IMU_data->Pitch,
@@ -108,6 +108,23 @@ void GimbalInit()
 
     gimbal_pub = PubRegister("gimbal_feed", sizeof(Gimbal_Upload_Data_s));
     gimbal_sub = SubRegister("gimbal_cmd", sizeof(Gimbal_Ctrl_Cmd_s));
+}
+
+/**
+ * @brief 就近限位: 把目标角度折到当前 pitch 反馈的 ±180 范围内
+ *        atan2 型反馈(Pitch)在 ±180 处跳变, 直接当目标会让电机绕整圈
+ * @param target robot_cmd 给出的目标角度(可能累积到 ±360 以上)
+ * @return 与当前角度距离不超过 180° 的等价目标
+ */
+static float pitch_ref_near(float target)
+{
+    float cur = gimba_IMU_data->Pitch;   /* 当前反馈, ±180 */
+    float err = target - cur;
+
+    while (err >  180.0f) err -= 360.0f;
+    while (err < -180.0f) err += 360.0f;
+
+    return cur + err;                    /* PID 的误差 = err, 恒在 ±180 内 */
 }
 
 /* 机器人云台控制核心任务,后续考虑只保留IMU控制,不再需要电机的反馈 */
@@ -149,14 +166,14 @@ void GimbalTask()
             DJIMotorStop(yaw_motor);   /* 等第一帧反馈, 避免用错误的 0 点 */
         }
         DJIMotorSetRef(yaw_motor,   gimbal_cmd_recv.yaw   + yaw_mech_off);
-        DJIMotorSetRef(pitch_motor, gimbal_cmd_recv.pitch + pitch_align_off);
+        DJIMotorSetRef(pitch_motor, pitch_ref_near(gimbal_cmd_recv.pitch + pitch_align_off));
         break;
     // 云台自由模式,使用编码器反馈,底盘和云台分离,仅云台旋转,一般用于调整云台姿态(英雄吊射等)/能量机关
     case GIMBAL_FREE_MODE:
         DJIMotorEnable(yaw_motor);
         DJIMotorEnable(pitch_motor);
         DJIMotorSetRef(yaw_motor,   gimbal_cmd_recv.yaw   + yaw_mech_off);
-        DJIMotorSetRef(pitch_motor, gimbal_cmd_recv.pitch + pitch_align_off);
+        DJIMotorSetRef(pitch_motor, pitch_ref_near(gimbal_cmd_recv.pitch + pitch_align_off));
         break;
     default:
         break;
