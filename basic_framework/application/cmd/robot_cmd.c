@@ -286,9 +286,10 @@ static void RemoteControlSet()
     else
         ; // 弹舱舵机控制,待添加servo_motor模块,关闭
 
-    /* LD 已改为底盘调速, 发射控件待重新分配; 暂时保持关闭 */
+    /* 调试期: 拨盘常转, 摩擦轮暂不开 */
     shoot_cmd_send.friction_mode = FRICTION_OFF;
-    shoot_cmd_send.load_mode = LOAD_STOP;
+    shoot_cmd_send.load_mode = LOAD_BURSTFIRE;
+    shoot_cmd_send.shoot_rate = 1.0f;      /* 1 发/秒 ≈ 输出轴 90°/s, 先低速观察 */
 
     // 射频控制,固定每秒1发,后续可以根据左侧拨轮的值大小切换射频,
     shoot_cmd_send.shoot_rate = 8;
