@@ -95,12 +95,12 @@ static void sbus_to_rc(const uint8_t *sbus_buf)
     memcpy(&rc_ctrl[LAST], &rc_ctrl[TEMP], sizeof(RC_ctrl_t)); // 保存上一次的数据,用于按键持续按下和切换的判断
 }
 
-/* SB(CH7) 异常值连续确认: 连续 N 帧都非法才按上档(急停)处理
+/* SC(CH8) 异常值连续确认: 连续 N 帧都非法才按上档(急停)处理
  * 3 帧 × 14ms(SBUS 70Hz) ≈ 42ms, 既能挡单帧误码, 急停响应也不迟钝 */
-#define SB_BAD_FRAME_THRESHOLD   3u
+#define SC_BAD_FRAME_THRESHOLD      3u
 
 /* 连续非法帧计数, 仅 fs_to_rc 内部使用 */
-static uint8_t s_sb_bad_cnt = 0;
+static uint8_t s_sc_bad_cnt  = 0;
 
 /**
  * @brief 把 SBUS 原始开关值映射为 0(上)/1(中)/2(下), 非法值按规则兜底
@@ -124,19 +124,19 @@ static uint16_t fs_map_switch(uint8_t idx, uint16_t val)
         result = 0;            /* 上挡 */
     }
 
-    if (idx == 6)
+    if (idx == 7)                              // ← CH8 = SC, 上档 = 急停
     {
-        /* SB: 合法帧清零计数, 非法帧累加, 达到阈值才判上档 */
+        /* SC: 合法帧清零计数, 非法帧累加, 达到阈值才判上档 */
         if (result != 0xFFu)
         {
-            s_sb_bad_cnt = 0;
+            s_sc_bad_cnt = 0;
         }
         else
         {
-            if (s_sb_bad_cnt < 0xFFu)
-                s_sb_bad_cnt++;
+            if (s_sc_bad_cnt < 0xFFu)
+                s_sc_bad_cnt++;
 
-            result = (s_sb_bad_cnt >= SB_BAD_FRAME_THRESHOLD) ? FS_RC_SW_UP
+            result = (s_sc_bad_cnt >= SC_BAD_FRAME_THRESHOLD) ? FS_RC_SW_UP
                                                               : FS_RC_SW_MID;
         }
     }

@@ -59,7 +59,7 @@ static uint16_t loader_jam_count         = 0;
  *   0 = 恢复正常遥控控制
  * 测试完务必改回 0
  * ============================================================ */
-#define LOADER_DEBUG_RUN     1
+#define LOADER_DEBUG_RUN     0
 #define LOADER_DEBUG_SPEED   3240.0f    /* aps, 约输出轴 90°/s (15 rpm) */
 
 /* 调试用: 拨盘目标转速, 可在 EmberProbe 里直接改, 无需重烧 */
