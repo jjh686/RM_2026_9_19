@@ -214,8 +214,11 @@ typedef struct
 
 typedef struct
 {
-    // code to go here
-    // ...
+    uint8_t  loader_state;        /* 0正常 1退弹 2冷却 */
+    uint8_t  loader_retry_cnt;    /* 当前连续卡弹次数 */
+    uint16_t loader_jam_count;    /* 累计卡弹次数 */
+    int16_t  loader_output;       /* 当前电流指令 */
+    int16_t  loader_speed;        /* 当前转速 aps */
 } Shoot_Upload_Data_s;
 
 /* ----------------ui绘制所需----------------*/
