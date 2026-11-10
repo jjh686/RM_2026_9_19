@@ -125,6 +125,9 @@ void VisionSetAltitude(float yaw, float pitch, float roll);
  * @brief 判断上位机(视觉/导航)通信是否在线
  * @return 1 在线, 0 离线
  */
+
+ void VisionSetReferee(uint16_t flag, float hp, float ammo, float map_x, float map_y);
+
 uint8_t VisionIsOnline(void);
 
 #endif // !MASTER_PROCESS_H

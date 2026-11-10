@@ -48,8 +48,10 @@ void OSTaskInit()
     osThreadDef(robottask, StartROBOTTASK, osPriorityNormal, 0, 1024);
     robotTaskHandle = osThreadCreate(osThread(robottask), NULL);
 
-    osThreadDef(uitask, StartUITASK, osPriorityNormal, 0, 512);
-    uiTaskHandle = osThreadCreate(osThread(uitask), NULL);
+    #if defined(ONE_BOARD) || defined(CHASSIS_BOARD)
+        osThreadDef(uitask, StartUITASK, osPriorityNormal, 0, 512);
+        uiTaskHandle = osThreadCreate(osThread(uitask), NULL); // 裁判系统只在底盘板
+    #endif
 
     HTMotorControlInit(); // 没有注册HT电机则不会执行
 }
@@ -68,7 +70,9 @@ __attribute__((noreturn)) void StartINSTASK(void const *argument)
         ins_dt = DWT_GetTimeline_ms() - ins_start;
         if (ins_dt > 1)
             LOGERROR("[freeRTOS] INS Task is being DELAY! dt = [%f]", &ins_dt);
-        VisionSend(); // 解算完成后发送视觉数据,但是当前的实现不太优雅,后续若添加硬件触发需要重新考虑结构的组织
+        #if defined(ONE_BOARD) || defined(GIMBAL_BOARD)
+                VisionSend(); // 上位机只接在云台板
+        #endif
         osDelay(1);
     }
 }

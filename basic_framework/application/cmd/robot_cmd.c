@@ -176,6 +176,7 @@ void RobotCMDInit()
         },
         .recv_data_len = sizeof(Chassis_Upload_Data_s),
         .send_data_len = sizeof(Chassis_Ctrl_Cmd_s),
+        .daemon_count = 10,
     };
     cmd_can_comm = CANCommInit(&comm_conf);
 #endif // GIMBAL_BOARD
@@ -209,6 +210,16 @@ static void CalcOffsetAngle()
     else
         chassis_cmd_send.offset_angle = angle - YAW_ALIGN_ANGLE + 360.0f;
 #endif
+}
+
+/* 是否处于正式比赛: 数据来自底盘回传; 双板掉线视为不在比赛 */
+static uint8_t IsInMatch(void)
+{
+#ifdef GIMBAL_BOARD
+    if (!CANCommIsOnline(cmd_can_comm))
+        return 0;
+#endif
+    return chassis_fetch_data.game_progress == 4;
 }
 
 /**
@@ -249,7 +260,7 @@ static void RemoteControlSet()
         }
         if (vision_recv_data->posture_cmd >= 1 && vision_recv_data->posture_cmd <= 6)
         {
-            SentrySetPosture(vision_recv_data->posture_cmd); // 同步上位机期望的哨兵姿态
+            chassis_cmd_send.posture_cmd = vision_recv_data->posture_cmd;
         }
     }
     else if (robot_state == ROBOT_READY)
@@ -365,7 +376,7 @@ static void SentryAutoSet(void)
         // 同步上位机期望的哨兵姿态 (1~6)
         if (vision_recv_data->posture_cmd >= 1 && vision_recv_data->posture_cmd <= 6)
         {
-            SentrySetPosture(vision_recv_data->posture_cmd);
+            chassis_cmd_send.posture_cmd = vision_recv_data->posture_cmd;
         }
     }
     else
@@ -477,7 +488,7 @@ static void MouseKeySet()
 static void EmergencyHandler(void)
 {
     uint8_t sb = rc_compat[TEMP].rc.switch_right;
-    uint8_t in_match = (GetRefereeData()->GameState.game_progress == 4); // 正式比赛进行中
+    uint8_t in_match = IsInMatch();
 
     /* 遥控器在线且SB在中/下档，或者正式比赛进行中且遥控器已关控，才允许运行 */
     uint8_t allow_run =
@@ -542,16 +553,24 @@ void RobotCMDTask()
         else if (switch_is_up(rc_compat[TEMP].rc.switch_left))   // 左开关[上]: 键盘控制
             MouseKeySet();
     }
-    else if (GetRefereeData()->GameState.game_progress == 4)
+    else if (IsInMatch())
     {
         // 赛场正式比赛阶段(遥控器已关闭): 全自动哨兵模式
         SentryAutoSet();
     }
 
+    /* 枪口热量保护: 剩余热量 < 30 停拨盘 (0xFFFF = 未接裁判系统, 不限制) */
+    if (chassis_fetch_data.heat_remain < 30 &&
+        shoot_cmd_send.load_mode == LOAD_BURSTFIRE)
+        shoot_cmd_send.load_mode = LOAD_STOP;
+
     EmergencyHandler(); // 处理模块离线和遥控器急停等紧急情况
 
-    // 设置视觉发送数据,还需增加加速度和角速度数据
-    // VisionSetFlag(chassis_fetch_data.enemy_color,,chassis_fetch_data.bullet_speed)
+    VisionSetReferee(chassis_fetch_data.vision_flag,
+                     (float)chassis_fetch_data.current_hp,
+                     (float)chassis_fetch_data.remain_ammo,
+                     chassis_fetch_data.map_target_x,
+                     chassis_fetch_data.map_target_y);
 
     // 推送消息,双板通信,视觉通信等
     // 其他应用所需的控制数据在remotecontrolsetmode和mousekeysetmode中完成设置

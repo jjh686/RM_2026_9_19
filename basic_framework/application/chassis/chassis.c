@@ -159,6 +159,7 @@ void ChassisInit()
         },
         .recv_data_len = sizeof(Chassis_Ctrl_Cmd_s),
         .send_data_len = sizeof(Chassis_Upload_Data_s),
+        .daemon_count = 10, // 100ms 收不到判离线 (daemon 任务 100Hz)
     };
     chasiss_can_comm = CANCommInit(&comm_conf); // can comm初始化
 #endif                                          // CHASSIS_BOARD
@@ -328,12 +329,24 @@ void ChassisTask()
 {
     // 后续增加没收到消息的处理(双板的情况)
     // 获取新的控制信息
-#ifdef ONE_BOARD
+#if defined(ONE_BOARD)
     SubGetMessage(chassis_sub, &chassis_cmd_recv);
-#endif
-#ifdef CHASSIS_BOARD
+#elif defined(CHASSIS_BOARD)
     chassis_cmd_recv = *(Chassis_Ctrl_Cmd_s *)CANCommGet(chasiss_can_comm);
-#endif // CHASSIS_BOARD
+    if (!CANCommIsOnline(chasiss_can_comm))
+    {
+        /* 滑环松了/云台板没上电: 立即零力, 防止按最后一帧乱跑 */
+        chassis_cmd_recv.chassis_mode = CHASSIS_ZERO_FORCE;
+        chassis_cmd_recv.vx = 0.0f;
+        chassis_cmd_recv.vy = 0.0f;
+        chassis_cmd_recv.wz = 0.0f;
+    }
+#endif
+
+    /* 姿态指令: 真正发 0x0120 的 UITask 在本板, 所以在这里转给 referee 模块 */
+    if (chassis_cmd_recv.posture_cmd >= 1 && chassis_cmd_recv.posture_cmd <= 6)
+        SentrySetPosture(chassis_cmd_recv.posture_cmd);
+
 
 #if defined(CHASSIS_TEST_FORWARD)
     // 台架测试: 强制固定速度前进, 覆盖遥控器/离线保护的命令
@@ -419,12 +432,36 @@ void ChassisTask()
     dbg_real_vy = chassis_feedback_data.real_vy;
     dbg_real_wz = chassis_feedback_data.real_wz;
 
-    // // 获取裁判系统数据   建议将裁判系统与底盘分离，所以此处数据应使用消息中心发送
-    // // 我方颜色id小于7是红色,大于7是蓝色,注意这里发送的是对方的颜色, 0:blue , 1:red
-    // chassis_feedback_data.enemy_color = referee_data->GameRobotState.robot_id > 7 ? 1 : 0;
-    // // 当前只做了17mm热量的数据获取,后续根据robot_def中的宏切换双枪管和英雄42mm的情况
-    // chassis_feedback_data.bullet_speed = referee_data->GameRobotState.shooter_id1_17mm_speed_limit;
-    // chassis_feedback_data.rest_heat = referee_data->PowerHeatData.shooter_heat0;
+    /* 打包 2027 裁判系统状态, 回传给 cmd (单板走 pubsub, 双板走 CAN) */
+    {
+        uint8_t my_id  = referee_data->GameRobotState.robot_id;
+        uint8_t enemy  = (my_id == 0) ? COLOR_NONE : ((my_id > 100) ? COLOR_RED : COLOR_BLUE);
+        uint8_t prog   = referee_data->GameState.game_progress & 0x0F;
+        uint8_t outc   = (referee_data->SentryInfo.sentry_info_2 >> 0) & 0x01;
+        uint8_t supply = (referee_data->RFIDdata.rfid_status >> 0) & 0x01;
+        uint8_t zones  = (referee_data->RFIDdata.rfid_status >> 11) & 0x07;
+        uint8_t center = (referee_data->EventData.event_data_2 >> 26) & 0x03;
+        uint8_t post   = (referee_data->SentryInfo.sentry_info_2 >> 12) & 0x03;
+
+        chassis_feedback_data.game_progress = prog;
+        chassis_feedback_data.enemy_color   = enemy;
+        chassis_feedback_data.vision_flag   = ((uint16_t)enemy  << 0)  |
+                                              ((uint16_t)prog   << 2)  |
+                                              ((uint16_t)outc   << 6)  |
+                                              ((uint16_t)supply << 7)  |
+                                              ((uint16_t)zones  << 8)  |
+                                              ((uint16_t)center << 11) |
+                                              ((uint16_t)post   << 13);
+        chassis_feedback_data.current_hp    = referee_data->GameRobotState.current_HP;
+        chassis_feedback_data.remain_ammo   = referee_data->AllowanceData.projectile_allowance_17mm;
+        chassis_feedback_data.map_target_x  = referee_data->MapData.target_position_x;
+        chassis_feedback_data.map_target_y  = referee_data->MapData.target_position_y;
+
+        uint16_t lim  = referee_data->GameRobotState.shooter_barrel_heat_limit;
+        uint16_t heat = referee_data->PowerHeatData.shooter_17mm_barrel_heat;
+        chassis_feedback_data.heat_remain = (lim == 0) ? 0xFFFF
+                                          : ((lim > heat) ? (lim - heat) : 0);
+    }
 
     // 推送反馈消息
 #ifdef ONE_BOARD

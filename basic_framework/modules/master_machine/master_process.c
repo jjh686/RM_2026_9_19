@@ -62,37 +62,21 @@ static void ResolveVisionFlag(uint16_t flag_register)
  *         bit 11-12: RMUL 中央控制区归属 (0中立, 1己方, 2对方, 来自0x0101 event_data_2 bit26-27)
  *         bit 13-15: 哨兵当前实际姿态 (1进攻, 2防御, 3移动, 来自0x020D)
  */
+static uint16_t s_vision_flag = 0;
+
+/* 由 robot_cmd 每周期调用; 数据来自 chassis_fetch_data, 单板/双板通用 */
+void VisionSetReferee(uint16_t flag, float hp, float ammo, float map_x, float map_y)
+{
+    s_vision_flag          = flag;
+    send_data.current_hp   = hp;
+    send_data.remain_ammo  = ammo;
+    send_data.map_target_x = map_x;
+    send_data.map_target_y = map_y;
+}
+
 static uint16_t PackRefereeToVision(void)
 {
-    referee_info_t *ref = GetRefereeData();
-    uint16_t flag = 0;
-
-    // 1. 根据本机ID判断敌方颜色 (本机1~11红方则打蓝=1; 本机>100蓝方则打红=2)
-    uint8_t my_id = ref->GameRobotState.robot_id;
-    uint8_t enemy_color = (my_id == 0) ? COLOR_NONE : ((my_id > 100) ? COLOR_RED : COLOR_BLUE);
-
-    uint8_t progress     = ref->GameState.game_progress & 0x0F;
-    uint8_t out_combat   = (ref->SentryInfo.sentry_info_2 >> 0) & 0x01;
-    uint8_t rfid_supply  = (ref->RFIDdata.rfid_status >> 0) & 0x01;
-    uint8_t rfid_zones   = (ref->RFIDdata.rfid_status >> 11) & 0x07;
-    uint8_t center_owner = (ref->EventData.event_data_2 >> 26) & 0x03;
-    uint8_t cur_posture  = (ref->SentryInfo.sentry_info_2 >> 12) & 0x03;
-
-    flag |= (enemy_color & 0x03) << 0;
-    flag |= (progress    & 0x0F) << 2;
-    flag |= (out_combat  & 0x01) << 6;
-    flag |= (rfid_supply & 0x01) << 7;
-    flag |= (rfid_zones  & 0x07) << 8;
-    flag |= (center_owner & 0x03) << 11;
-    flag |= (cur_posture & 0x07) << 13;
-
-    // 2. 填充连续 float 数组
-    send_data.current_hp   = (float)ref->GameRobotState.current_HP;
-    send_data.remain_ammo  = (float)ref->AllowanceData.projectile_allowance_17mm;
-    send_data.map_target_x = ref->MapData.target_position_x;
-    send_data.map_target_y = ref->MapData.target_position_y;
-
-    return flag;
+    return s_vision_flag;
 }
 
 /**

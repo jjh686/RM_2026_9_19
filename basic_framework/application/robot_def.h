@@ -17,9 +17,9 @@
 #include "stdint.h"
 
 /* 开发板类型定义,烧录时注意不要弄错对应功能;修改定义后需要重新编译,只能存在一个定义! */
-#define ONE_BOARD // 单板控制整车
+// #define ONE_BOARD // 单板控制整车
 // #define CHASSIS_BOARD //底盘板
-// #define GIMBAL_BOARD  //云台板
+#define GIMBAL_BOARD  //云台板
 
 #define VISION_USE_VCP  // 使用虚拟串口发送视觉数据
 // #define VISION_USE_UART // 使用串口发送视觉数据
@@ -157,7 +157,7 @@ typedef struct
     int chassis_speed_buff;
     // UI部分
     //  ...
-
+    uint8_t posture_cmd;   // 新增: 上位机期望的哨兵姿态 1~6, 0=不变; 由底盘板负责发 0x0120
 } Chassis_Ctrl_Cmd_s;
 
 // cmd发布的云台控制数据,由gimbal订阅
@@ -190,20 +190,22 @@ typedef struct
 
 typedef struct
 {
-#if defined(CHASSIS_BOARD) || defined(GIMBAL_BOARD) // 非单板的时候底盘还将imu数据回传(若有必要)
-    // attitude_t chassis_imu_data;
-#endif
-    // 后续增加底盘的真实速度
     float real_vx;
     float real_vy;
     float real_wz;
+    float    map_target_x;
+    float    map_target_y;
 
-
-    uint8_t rest_heat;           // 剩余枪口热量
-    Bullet_Speed_e bullet_speed; // 弹速限制
-    Enemy_Color_e enemy_color;   // 0 for blue, 1 for red
+    /* 底盘板 → 云台板: 2027 裁判系统状态 */
+    uint16_t vision_flag;   // 打包好的 16 位状态字, 云台板直接转发给上位机
+    uint16_t current_hp;
+    uint16_t remain_ammo;
+    uint16_t heat_remain;   // 枪口剩余热量, 0xFFFF = 未接裁判系统
+    uint8_t  game_progress; // 4 = 正式比赛中
+    uint8_t  enemy_color;   // 0未知 1蓝 2红
 
 } Chassis_Upload_Data_s;
+
 
 
 typedef struct
