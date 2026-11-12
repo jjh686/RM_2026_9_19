@@ -95,7 +95,7 @@ void GimbalInit()
     DMMotor_Init_Config_s pitch_config = {
         .can_init_config = {
             .can_handle = &hcan2,   // 按实际接线改: 电调中心板2 用 &hcan1, C 板 CAN2 口用 &hcan2
-            .tx_id = 0x1,          // 达妙上位机的 CAN ID
+            .tx_id = 0x2,          // 达妙上位机的 CAN ID
             .rx_id = 0x0,          // 达妙上位机的 Master ID
         },
         .controller_param_init_config = {
