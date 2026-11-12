@@ -181,7 +181,7 @@ void GimbalTask()
         pitch_zero_off  = pitch_motor->measure.total_position;
         pitch_zero_done = 1;
     }
-    
+
     if (gimbal_cmd_recv.gimbal_mode == GIMBAL_GYRO_MODE && prev_gimbal_mode != GIMBAL_GYRO_MODE)
     {
         pitch_align_off = 0.0f;   /* pitch 用 IMU 绝对角, 水平为 0 */
@@ -247,7 +247,7 @@ void GimbalTask()
 
         /* ⚠️ gimbal_cmd_recv.pitch 是"度", 达妙是"弧度", 必须转换 */
         DMMotorOuterLoop(pitch_motor, ANGLE_LOOP);
-        DMMotorSetRef(pitch_motor, gimbal_cmd_recv.pitch * DEGREE_2_RAD);
+        DMMotorSetRef(pitch_motor, gimbal_cmd_recv.pitch * DEGREE_2_RAD + pitch_zero_off);
         break;
 
     default:
