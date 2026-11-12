@@ -244,10 +244,10 @@ static void RemoteControlSet()
         gimbal_cmd_send.pitch += 0.0003f * (float)rc_compat[TEMP].rc.rocker_l1;   // 0.001 → 0.0003
     }
 
-    // if (gimbal_cmd_send.pitch > PITCH_MAX_ANGLE) gimbal_cmd_send.pitch = PITCH_MAX_ANGLE;
-    // if (gimbal_cmd_send.pitch < PITCH_MIN_ANGLE) gimbal_cmd_send.pitch = PITCH_MIN_ANGLE;
-    // if (gimbal_cmd_send.yaw   > YAW_MAX_ANGLE)   gimbal_cmd_send.yaw   = YAW_MAX_ANGLE;
-    // if (gimbal_cmd_send.yaw   < YAW_MIN_ANGLE)   gimbal_cmd_send.yaw   = YAW_MIN_ANGLE;
+    if (gimbal_cmd_send.pitch > PITCH_MAX_ANGLE) gimbal_cmd_send.pitch = PITCH_MAX_ANGLE;
+    if (gimbal_cmd_send.pitch < PITCH_MIN_ANGLE) gimbal_cmd_send.pitch = PITCH_MIN_ANGLE;
+    if (gimbal_cmd_send.yaw   > YAW_MAX_ANGLE)   gimbal_cmd_send.yaw   = YAW_MAX_ANGLE;
+    if (gimbal_cmd_send.yaw   < YAW_MIN_ANGLE)   gimbal_cmd_send.yaw   = YAW_MIN_ANGLE;
 
     /* 2. 底盘速度控制: 左开关[中]由上位机导航控制, 左开关[下]由遥控器摇杆控制 */
     float ld = (float)rc_compat[TEMP].rc.dial;
