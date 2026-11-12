@@ -34,7 +34,8 @@ static Chassis_Upload_Data_s chassis_fetch_data; // 从底盘应用接收的反�
 
 static FS_RC_ctrl_t *fs_rc_data;        // SBUS 原始数据,初始化时返回
 static RC_ctrl_t rc_compat[2];          // 适配成 DBUS 语义的数据[TEMP/LAST]
-static int8_t spin_dir = 1;             // +1 逆时针 / -1 顺时针, 由 CH6 决定
+static int8_t spin_dir = 1;             // +1 逆时针 / -1 顺时针, SC 中→下 切换一次翻转一次
+static uint8_t shoot_enable = 0;        // CH6(SA): 1=下档开火, 0=上档停射
 static Vision_Recv_s *vision_recv_data; // 视觉接收数据指针,初始化时返回
 // static Vision_Send_s vision_send_data;  // 视觉发送数据
 
@@ -84,11 +85,21 @@ static void FS2RC_Adapt(void)
 
     /* SBUS 开关: 0上/1中/2下  →  框架: RC_SW_UP=1 / RC_SW_MID=3 / RC_SW_DOWN=2 */
     static const uint8_t sw_map[3] = { RC_SW_UP, RC_SW_MID, RC_SW_DOWN };
-    rc_compat[TEMP].rc.switch_right = sw_map[fs_rc_data[TEMP].channel[6]];  /* CH7 = SB */
-    rc_compat[TEMP].rc.switch_left  = sw_map[fs_rc_data[TEMP].channel[7]];  /* CH8 = SC */
+    rc_compat[TEMP].rc.switch_left  = sw_map[fs_rc_data[TEMP].channel[6]];  /* CH7 = SB */
+    rc_compat[TEMP].rc.switch_right = sw_map[fs_rc_data[TEMP].channel[7]];  /* CH8 = SC */
 
-    rc_compat[TEMP].rc.dial = fs_rc_data[TEMP].rc.knob_l;                 /* CH5 左旋钮 → 急停 */
-    spin_dir = (fs_rc_data[TEMP].rc.knob_r > 400) ? -1 : 1;   // 拧到偏左(正)侧才反向
+    /* CH5(LD 旋钮): 只用于底盘调速, 不再控制陀螺方向 */
+    rc_compat[TEMP].rc.dial = fs_rc_data[TEMP].rc.knob_l;
+
+    /* SC(CH8) 中档 → 下档: 翻转一次陀螺方向 */
+    if (switch_is_mid(rc_compat[LAST].rc.switch_right) &&
+        switch_is_down(rc_compat[TEMP].rc.switch_right))
+    {
+        spin_dir = (spin_dir > 0) ? -1 : 1;
+    }
+
+    /* CH6(SA 两档): 上档 = 停射, 下档 = 开火 */
+    shoot_enable = (fs_rc_data[TEMP].rc.knob_r > 400) ? 1u : 0u;
 
     /* 摇杆死区, 防止中立点漂移导致底盘缓慢爬行 */
     if (abs(rc_compat[TEMP].rc.rocker_l_) < 40) rc_compat[TEMP].rc.rocker_l_ = 0;
@@ -244,17 +255,17 @@ static void RemoteControlSet()
         gimbal_cmd_send.pitch += 0.0003f * (float)rc_compat[TEMP].rc.rocker_l1;   // 0.001 → 0.0003
     }
 
-    if (gimbal_cmd_send.pitch > PITCH_MAX_ANGLE) gimbal_cmd_send.pitch = PITCH_MAX_ANGLE;
-    if (gimbal_cmd_send.pitch < PITCH_MIN_ANGLE) gimbal_cmd_send.pitch = PITCH_MIN_ANGLE;
-    if (gimbal_cmd_send.yaw   > YAW_MAX_ANGLE)   gimbal_cmd_send.yaw   = YAW_MAX_ANGLE;
-    if (gimbal_cmd_send.yaw   < YAW_MIN_ANGLE)   gimbal_cmd_send.yaw   = YAW_MIN_ANGLE;
+    // if (gimbal_cmd_send.pitch > PITCH_MAX_ANGLE) gimbal_cmd_send.pitch = PITCH_MAX_ANGLE;
+    // if (gimbal_cmd_send.pitch < PITCH_MIN_ANGLE) gimbal_cmd_send.pitch = PITCH_MIN_ANGLE;
+    // if (gimbal_cmd_send.yaw   > YAW_MAX_ANGLE)   gimbal_cmd_send.yaw   = YAW_MAX_ANGLE;
+    // if (gimbal_cmd_send.yaw   < YAW_MIN_ANGLE)   gimbal_cmd_send.yaw   = YAW_MIN_ANGLE;
 
     /* 2. 底盘速度控制: 左开关[中]由上位机导航控制, 左开关[下]由遥控器摇杆控制 */
     float ld = (float)rc_compat[TEMP].rc.dial;
     if (ld < -660.0f) ld = -660.0f;
     if (ld >  660.0f) ld =  660.0f;
     float ratio       = (ld + 660.0f) / 1320.0f;   // 0 ~ 1
-    float speed_scale = 0.30f + 0.80f * ratio;     // 0.30 ~ 1.10
+    float speed_scale = 1.0f * ratio;              // 0.0 ~ 1.0
     chassis_cmd_send.chassis_speed_buff = (int)(speed_scale * 100.0f);
 
     if (switch_is_mid(rc_compat[TEMP].rc.switch_left))
@@ -287,12 +298,22 @@ static void RemoteControlSet()
         ; // 弹舱舵机控制,待添加servo_motor模块,关闭
 
     /* 调试期: 拨盘常转, 摩擦轮暂不开 */
-    shoot_cmd_send.friction_mode = FRICTION_OFF;
-    shoot_cmd_send.load_mode = LOAD_BURSTFIRE;
-    shoot_cmd_send.shoot_rate = 1.0f;      /* 1 发/秒 ≈ 输出轴 90°/s, 先低速观察 */
-
-    // 射频控制,固定每秒1发,后续可以根据左侧拨轮的值大小切换射频,
-    shoot_cmd_send.shoot_rate = 8;
+    /* CH6(SA): 上档=安全停射, 下档=摩擦轮开+连发 */
+    if (shoot_enable && robot_state == ROBOT_READY)
+    {
+        shoot_cmd_send.shoot_mode    = SHOOT_ON;
+        shoot_cmd_send.friction_mode = FRICTION_ON;
+        shoot_cmd_send.load_mode     = LOAD_BURSTFIRE;
+        shoot_cmd_send.bullet_speed  = SMALL_AMU_18;
+        shoot_cmd_send.shoot_rate    = 15.0f * speed_scale;
+    }
+    else
+    {
+        shoot_cmd_send.shoot_mode    = SHOOT_ON;       /* 不用 SHOOT_OFF, 避免电机使能全撤 */
+        shoot_cmd_send.friction_mode = FRICTION_OFF;
+        shoot_cmd_send.load_mode     = LOAD_STOP;
+        shoot_cmd_send.shoot_rate    = 0.0f;
+    }
 }
 
 /**

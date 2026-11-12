@@ -11,8 +11,8 @@
 #define DM_TASK_CYCLE 2 //达妙任务运行周期，决定控制频率，PID计算频率以及电机反馈频率，必须为整数，单位为ms，推荐值为2
 
 //以下为位置，速度，力矩的映射范围，电机第一次使用时一定要配合实际情况以及DM调试助手修改
-#define DM_P_MIN (-12.5f)
-#define DM_P_MAX 12.5f // 位置范围推荐设置为3.14159265358979f，可以方便多圈计数和就近转位
+#define DM_P_MIN (-3.14159f)
+#define DM_P_MAX 3.14159f // 位置范围推荐设置为3.14159265358979f，可以方便多圈计数和就近转位
 #define DM_V_MIN (-30.0f)
 #define DM_V_MAX 30.0f
 #define DM_T_MIN (-10.0f)

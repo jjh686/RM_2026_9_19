@@ -108,12 +108,12 @@ void GimbalInit()
                 .MaxOut = 15.0f,        // 最大目标角速度 15 rad/s
             },
             .speed_PID = {
-                .Kp = 0.2f,             // 单位 N·m / (rad/s); 空载 0.1~0.3 即可
-                .Ki = 0.01f,            // 先给很小, 排除积分反冲
+                .Kp = 0.8f,             // 单位 N·m / (rad/s); 空载 0.1~0.3 即可
+                .Ki = 0.05f,            // 先给很小, 排除积分反冲
                 .Kd = 0.0f,
                 .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
                 .IntegralLimit = 0.5f,  // 积分最多贡献 0.5 N·m
-                .MaxOut = 2.0f,         // 限 2 N·m (4310 峰值 10 N·m, 撞机械也不至于打坏)
+                .MaxOut = 3.0f,         // 限 3 N·m (4310 峰值 10 N·m, 撞机械也不至于打坏)
             },
         },
         .controller_setting_init_config = {
