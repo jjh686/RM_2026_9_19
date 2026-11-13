@@ -17,6 +17,15 @@ static Publisher_t *gimbal_pub;                   // 云台应用消息发布者
 static Subscriber_t *gimbal_sub;                  // cmd控制消息订阅者
 static Gimbal_Upload_Data_s gimbal_feedback_data; // 回传给cmd的云台状态信息
 static Gimbal_Ctrl_Cmd_s gimbal_cmd_recv;         // 来自cmd的控制信息
+/* IMU 单位转换: 度 → 弧度。dmmotor 的 PID 全部按弧度计算 */
+static float pitch_imu_rad  = 0.0f;   /* = gimba_IMU_data->Pitch × DEGREE_2_RAD */
+static float pitch_gyro_rad = 0.0f;   /* = gimba_IMU_data->Gyro[1] × DEGREE_2_RAD */
+static float   pitch_zero_off  = 0.0f;    /* pitch 上电位置基准(弧度) */
+static uint8_t pitch_zero_done = 0;
+/* 重力前馈: τ_g = K_g × cos(pitch), K_g 实测 0.3~1.2 N·m */
+#define PITCH_GRAVITY_K   0.5f          /* 水平时的重力矩(N·m), 先给 0.5 再实测 */
+static float pitch_gravity_ff = 0.0f;
+
 
 // static BMI088Instance *bmi088; // 云台IMU
 void GimbalInit()
@@ -87,13 +96,20 @@ void GimbalInit()
                 .IntegralLimit = 0.5f,
                 .MaxOut = 3.0f,         // 限 3 N·m (4310 峰值 10 N·m)
             },
+            /* ← 新增这两个指针, 否则 OTHER_FEED 会解引用 NULL */
+            .other_angle_feedback_ptr = &pitch_imu_rad,
+            .other_speed_feedback_ptr = &pitch_gyro_rad,
+            /* ← 新增: 力矩前馈指针 */
+            .force_feedforward_ptr = &pitch_gravity_ff,
+
         },
         .controller_setting_init_config = {
             .angle_feedback_source = OTHER_FEED, // 外环采用 IMU 反馈
             .speed_feedback_source = MOTOR_FEED, // 内环采用达妙电机自身速度反馈
-            .outer_loop_type = SPEED_LOOP,         // 默认先测速度环
+            .outer_loop_type = ANGLE_LOOP,         // 默认先测角度环
             .close_loop_type = ANGLE_LOOP | SPEED_LOOP,
             .motor_reverse_flag = MOTOR_DIRECTION_NORMAL,
+            .feedforward_flag = FORCE_FEEDFORWARD,   /* ← 新增 */
         },
     };
 
@@ -107,12 +123,44 @@ void GimbalInit()
     gimbal_sub = SubRegister("gimbal_cmd", sizeof(Gimbal_Ctrl_Cmd_s));
 }
 
+/**
+ * @brief 就近限位(弧度版): 把目标折到当前 IMU 反馈的 ±π 范围内
+ */
+static float pitch_ref_near_rad(float target_rad)
+{
+    float err = target_rad - pitch_imu_rad;
+
+    while (err >  3.14159265f) err -= 6.2831853f;
+    while (err < -3.14159265f) err += 6.2831853f;
+
+    return pitch_imu_rad + err;
+}
+
 /* 机器人云台控制核心任务,后续考虑只保留IMU控制,不再需要电机的反馈 */
 void GimbalTask()
 {
     // 获取云台控制数据
     // 后续增加未收到数据的处理
     SubGetMessage(gimbal_sub, &gimbal_cmd_recv);
+
+    /* IMU 度 → 弧度, 供 dmmotor 的 PID 使用 */
+    pitch_imu_rad  = gimba_IMU_data->Pitch   * DEGREE_2_RAD;
+    pitch_gyro_rad = gimba_IMU_data->Gyro[1] * DEGREE_2_RAD;
+    /* 重力前馈: 枪管重心偏前, 重力矩 = K_g × cos(pitch) */
+    pitch_gravity_ff = PITCH_GRAVITY_K * arm_cos_f32(pitch_imu_rad);
+
+    if (pitch_motor == NULL)
+    {
+        PubPushMessage(gimbal_pub, (void *)&gimbal_feedback_data);
+        return;
+    }
+
+    /* 等电机反馈真正到达(系统已跑起来)再标定, 避免 IMU 未收敛时标错 */
+    if (!pitch_zero_done && pitch_motor->rx_init_flag == 1)
+    {
+        pitch_zero_off  = pitch_imu_rad;
+        pitch_zero_done = 1;
+    }
 
     // @todo:现在已不再需要电机反馈,实际上可以始终使用IMU的姿态数据来作为云台的反馈,yaw电机的offset只是用来跟随底盘
     // 根据控制模式进行电机反馈切换和过渡,视觉模式在robot_cmd模块就已经设置好,gimbal只看yaw_ref和pitch_ref
@@ -127,23 +175,15 @@ void GimbalTask()
     case GIMBAL_GYRO_MODE: // 后续只保留此模式
         DJIMotorEnable(yaw_motor);
         DMMotorEnable(pitch_motor);
-        DJIMotorChangeFeed(yaw_motor, ANGLE_LOOP, OTHER_FEED);
-        DJIMotorChangeFeed(yaw_motor, SPEED_LOOP, OTHER_FEED);
-        DMMotorChangeFeed(pitch_motor, ANGLE_LOOP, OTHER_FEED);
-        DMMotorChangeFeed(pitch_motor, SPEED_LOOP, OTHER_FEED);
         DJIMotorSetRef(yaw_motor, gimbal_cmd_recv.yaw); // yaw和pitch会在robot_cmd中处理好多圈和单圈
-        DMMotorSetRef(pitch_motor, gimbal_cmd_recv.pitch);
+        DMMotorSetRef(pitch_motor,pitch_ref_near_rad(gimbal_cmd_recv.pitch * DEGREE_2_RAD + pitch_zero_off));
         break;
     // 云台自由模式,使用编码器反馈,底盘和云台分离,仅云台旋转,一般用于调整云台姿态(英雄吊射等)/能量机关
     case GIMBAL_FREE_MODE: // 后续删除,或加入云台追地盘的跟随模式(响应速度更快)
         DJIMotorEnable(yaw_motor);
         DMMotorEnable(pitch_motor);
-        DJIMotorChangeFeed(yaw_motor, ANGLE_LOOP, OTHER_FEED);
-        DJIMotorChangeFeed(yaw_motor, SPEED_LOOP, OTHER_FEED);
-        DMMotorChangeFeed(pitch_motor, ANGLE_LOOP, OTHER_FEED);
-        DMMotorChangeFeed(pitch_motor, SPEED_LOOP, OTHER_FEED);
         DJIMotorSetRef(yaw_motor, gimbal_cmd_recv.yaw); // yaw和pitch会在robot_cmd中处理好多圈和单圈
-        DMMotorSetRef(pitch_motor, gimbal_cmd_recv.pitch);
+        DMMotorSetRef(pitch_motor,pitch_ref_near_rad(gimbal_cmd_recv.pitch * DEGREE_2_RAD + pitch_zero_off));
         break;
     default:
         break;
