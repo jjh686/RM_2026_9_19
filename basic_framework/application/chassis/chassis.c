@@ -359,7 +359,18 @@ void ChassisTask()
 
     // 未接裁判系统时 chassis_power_limit 为 0,会把功率缩放成 0 导致底盘不动
     float power_limit = referee_data->GameRobotState.chassis_power_limit;
-    SetPowerLimit(power_limit > 1.0f ? power_limit : 60.0f);
+    if (power_limit < 1.0f) power_limit = 60.0f;   /* 未接裁判系统时兜底 */
+
+    /* 缓冲能量保护: 低于 45J 时按比例压低功率, 防止跌破 0 断电 5s */
+    uint16_t buf_energy = referee_data->PowerHeatData.buffer_energy;
+    if (buf_energy > 0 && buf_energy < 45)
+    {
+        float scale = (float)buf_energy / 45.0f;
+        if (scale < 0.3f) scale = 0.3f;               /* 最低保 30% */
+        power_limit *= scale;
+    }
+
+    SetPowerLimit(power_limit);
 
     if (chassis_cmd_recv.chassis_mode == CHASSIS_ZERO_FORCE)
     { // 如果出现重要模块离线或遥控器设置为急停,让电机停止

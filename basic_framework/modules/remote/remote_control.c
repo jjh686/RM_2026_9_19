@@ -210,10 +210,18 @@ static void RemoteControlRxCallback()
  * @brief 对fs_to_rc的简单封装,用于注册到bsp_usart的回调函数中
  *
  */
-static void FS_RemoteControlRxCallback()
+static void FS_RemoteControlRxCallback(void)
 {
-    DaemonReload(rc_daemon_instance);         // 先喂狗
-    fs_to_rc(rc_usart_instance->recv_buff); // 进行协议解析
+    uint8_t *buf = rc_usart_instance->recv_buff;
+
+    /* SBUS Failsafe(bit3) / FrameLost(bit2): 遥控关机或丢帧时不喂狗,
+     * 让 RemoteControlIsOnline() 超时归 0, 比赛全自动模式才能接管 */
+    if (buf[0] == 0x0F && (buf[23] & 0x0C) == 0)
+    {
+        DaemonReload(rc_daemon_instance);
+    }
+
+    fs_to_rc(buf);   /* 解析照常, 但不再刷新在线计数 */
 }
 
 /**

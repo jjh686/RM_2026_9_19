@@ -19,7 +19,7 @@ static Gimbal_Upload_Data_s gimbal_feedback_data; // 回传给cmd的云台状态
 static Gimbal_Ctrl_Cmd_s gimbal_cmd_recv;         // 来自cmd的控制信息
 /* IMU 单位转换: 度 → 弧度。dmmotor 的 PID 全部按弧度计算 */
 static float pitch_imu_rad  = 0.0f;   /* = gimba_IMU_data->Pitch × DEGREE_2_RAD */
-static float pitch_gyro_rad = 0.0f;   /* = gimba_IMU_data->Gyro[1] × DEGREE_2_RAD */
+static float pitch_gyro_rad = 0.0f;   /* = gimba_IMU_data->Gyro[1] (已经是 rad/s) */
 static float   pitch_zero_off  = 0.0f;    /* pitch 上电位置基准(弧度) */
 static uint8_t pitch_zero_done = 0;
 /* 重力前馈: τ_g = K_g × cos(pitch), K_g 实测 0.3~1.2 N·m */
@@ -144,8 +144,8 @@ void GimbalTask()
     SubGetMessage(gimbal_sub, &gimbal_cmd_recv);
 
     /* IMU 度 → 弧度, 供 dmmotor 的 PID 使用 */
-    pitch_imu_rad  = gimba_IMU_data->Pitch   * DEGREE_2_RAD;
-    pitch_gyro_rad = gimba_IMU_data->Gyro[1] * DEGREE_2_RAD;
+    pitch_imu_rad  = gimba_IMU_data->Pitch * DEGREE_2_RAD;   /* Pitch 是度, 要转 */
+    pitch_gyro_rad = gimba_IMU_data->Gyro[1];                /* 已经是 rad/s, 不转 */
     /* 重力前馈: 枪管重心偏前, 重力矩 = K_g × cos(pitch) */
     pitch_gravity_ff = PITCH_GRAVITY_K * arm_cos_f32(pitch_imu_rad);
 

@@ -401,7 +401,7 @@ static void MouseKeySet()
     chassis_cmd_send.chassis_mode = CHASSIS_NO_FOLLOW; // 键盘模式同样需要明确模式, 否则可能残留 ZERO_FORCE
     gimbal_cmd_send.gimbal_mode = GIMBAL_GYRO_MODE;   // 云台同理, 否则可能残留 ZERO_FORCE
     chassis_cmd_send.vx = rc_compat[TEMP].key[KEY_PRESS].w * 300 - rc_compat[TEMP].key[KEY_PRESS].s * 300; // 系数待测
-    chassis_cmd_send.vy = rc_compat[TEMP].key[KEY_PRESS].s * 300 - rc_compat[TEMP].key[KEY_PRESS].d * 300;
+    chassis_cmd_send.vy = rc_compat[TEMP].key[KEY_PRESS].a * 300 - rc_compat[TEMP].key[KEY_PRESS].d * 300;
 
     gimbal_cmd_send.yaw += (float)rc_compat[TEMP].mouse.x / 660 * 10; // 系数待测
     gimbal_cmd_send.pitch += (float)rc_compat[TEMP].mouse.y / 660 * 10;
