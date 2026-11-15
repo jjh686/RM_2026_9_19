@@ -98,6 +98,20 @@ static void FS2RC_Adapt(void)
         spin_dir = (spin_dir > 0) ? -1 : 1;
     }
 
+    if (switch_is_mid(rc_compat[LAST].rc.switch_left) &&
+        switch_is_down(rc_compat[TEMP].rc.switch_left))
+    {
+        /* 把当前实际角度回填成目标, 让云台原地接管, 不跳回中位 */
+        float cur_yaw = (float)gimbal_fetch_data.yaw_motor_single_round_angle
+                        - YAW_ALIGN_ANGLE;
+
+        /* 归一到 ±180 */
+        if (cur_yaw >  180.0f) cur_yaw -= 360.0f;
+        if (cur_yaw < -180.0f) cur_yaw += 360.0f;
+
+        gimbal_cmd_send.yaw = cur_yaw;
+    }
+
     /* CH6(SA 两档): 上档 = 停射, 下档 = 开火 */
     shoot_enable = (fs_rc_data[TEMP].rc.knob_r > 400) ? 1u : 0u;
 
@@ -187,24 +201,14 @@ void RobotCMDInit()
  */
 static void CalcOffsetAngle()
 {
-    // 别名angle提高可读性,不然太长了不好看,虽然基本不会动这个函数
-    static float angle;
-    angle = gimbal_fetch_data.yaw_motor_single_round_angle; // 从云台获取的当前yaw电机单圈角度
-#if YAW_ECD_GREATER_THAN_4096                               // 如果大于180度
-    if (angle > YAW_ALIGN_ANGLE && angle <= 180.0f + YAW_ALIGN_ANGLE)
-        chassis_cmd_send.offset_angle = angle - YAW_ALIGN_ANGLE;
-    else if (angle > 180.0f + YAW_ALIGN_ANGLE)
-        chassis_cmd_send.offset_angle = angle - YAW_ALIGN_ANGLE - 360.0f;
-    else
-        chassis_cmd_send.offset_angle = angle - YAW_ALIGN_ANGLE;
-#else // 小于180度
-    if (angle > YAW_ALIGN_ANGLE)
-        chassis_cmd_send.offset_angle = angle - YAW_ALIGN_ANGLE;
-    else if (angle <= YAW_ALIGN_ANGLE && angle >= YAW_ALIGN_ANGLE - 180.0f)
-        chassis_cmd_send.offset_angle = angle - YAW_ALIGN_ANGLE;
-    else
-        chassis_cmd_send.offset_angle = angle - YAW_ALIGN_ANGLE + 360.0f;
-#endif
+    /* 单圈角度 0~360, ALIGN 可以是任意值; 统一做 ±180 最短路径, 不再区分是否 >4096 */
+    float angle = gimbal_fetch_data.yaw_motor_single_round_angle;
+    float off   = angle - YAW_ALIGN_ANGLE;
+
+    if (off >  180.0f) off -= 360.0f;
+    if (off < -180.0f) off += 360.0f;
+
+    chassis_cmd_send.offset_angle = off;
 }
 
 /**
@@ -251,14 +255,14 @@ static void RemoteControlSet()
     else if (robot_state == ROBOT_READY)
     {
         // 左开关[下]或视觉无目标: 遥控器摇杆控制云台
-        gimbal_cmd_send.yaw   += 0.0007f * (float)rc_compat[TEMP].rc.rocker_l_;   // 0.005 → 0.0007
+        gimbal_cmd_send.yaw   -= 0.0007f * (float)rc_compat[TEMP].rc.rocker_l_;   // 0.005 → 0.0007
         gimbal_cmd_send.pitch += 0.0003f * (float)rc_compat[TEMP].rc.rocker_l1;   // 0.001 → 0.0003
     }
 
-    // if (gimbal_cmd_send.pitch > PITCH_MAX_ANGLE) gimbal_cmd_send.pitch = PITCH_MAX_ANGLE;
-    // if (gimbal_cmd_send.pitch < PITCH_MIN_ANGLE) gimbal_cmd_send.pitch = PITCH_MIN_ANGLE;
-    // if (gimbal_cmd_send.yaw   > YAW_MAX_ANGLE)   gimbal_cmd_send.yaw   = YAW_MAX_ANGLE;
-    // if (gimbal_cmd_send.yaw   < YAW_MIN_ANGLE)   gimbal_cmd_send.yaw   = YAW_MIN_ANGLE;
+    if (gimbal_cmd_send.pitch > PITCH_MAX_ANGLE) gimbal_cmd_send.pitch = PITCH_MAX_ANGLE;
+    if (gimbal_cmd_send.pitch < PITCH_MIN_ANGLE) gimbal_cmd_send.pitch = PITCH_MIN_ANGLE;
+    if (gimbal_cmd_send.yaw   > YAW_MAX_ANGLE)   gimbal_cmd_send.yaw   = YAW_MAX_ANGLE;
+    if (gimbal_cmd_send.yaw   < YAW_MIN_ANGLE)   gimbal_cmd_send.yaw   = YAW_MIN_ANGLE;
 
     /* 2. 底盘速度控制: 左开关[中]由上位机导航控制, 左开关[下]由遥控器摇杆控制 */
     float ld = (float)rc_compat[TEMP].rc.dial;
@@ -497,6 +501,7 @@ static void EmergencyHandler(void)
         chassis_cmd_send.chassis_mode = CHASSIS_ZERO_FORCE;
 
         gimbal_cmd_send.gimbal_mode = GIMBAL_ZERO_FORCE;
+        gimbal_cmd_send.pitch = 0.0f;      /* ← 新增: 急停时清空累积目标 */
 
         shoot_cmd_send.shoot_mode = SHOOT_OFF;
         shoot_cmd_send.friction_mode = FRICTION_OFF;

@@ -26,11 +26,11 @@
 
 /* 机器人重要参数定义,注意根据不同机器人进行修改,浮点数需要以.0或f结尾,无符号以u结尾 */
 // 云台参数
-#define YAW_CHASSIS_ALIGN_ECD 2711  // 云台和底盘对齐指向相同方向时的电机编码器值,若对云台有机械改动需要修改
-#define YAW_ECD_GREATER_THAN_4096 0 // ALIGN_ECD值是否大于4096,是为1,否为0;用于计算云台偏转角度
+#define YAW_CHASSIS_ALIGN_ECD 7863  // 云台和底盘对齐指向相同方向时的电机编码器值,若对云台有机械改动需要修改
+#define YAW_ECD_GREATER_THAN_4096 1 // ALIGN_ECD值是否大于4096,是为1,否为0;用于计算云台偏转角度
 #define PITCH_HORIZON_ECD 3412      // 云台处于水平位置时编码器值,若对云台有机械改动需要修改
-#define PITCH_MAX_ANGLE 90.0f       // 云台竖直方向最大角度 (注意反馈如果是陀螺仪，则填写陀螺仪的角度)
-#define PITCH_MIN_ANGLE -90.0f      // 云台竖直方向最小角度 (注意反馈如果是陀螺仪，则填写陀螺仪的角度)
+#define PITCH_MAX_ANGLE 15.1f       // 云台竖直方向最大角度 (注意反馈如果是陀螺仪，则填写陀螺仪的角度)
+#define PITCH_MIN_ANGLE -38.1f      // 云台竖直方向最小角度 (注意反馈如果是陀螺仪，则填写陀螺仪的角度)
 #define YAW_MAX_ANGLE   90.0f    // 新增, 测试期收紧
 #define YAW_MIN_ANGLE   -90.0f   // 新增
 // 发射参数
@@ -50,7 +50,7 @@
 #define CHASSIS_OMNI
 
 /* 调试: 云台未接入时关闭底盘-云台角度映射,否则 offset_angle 恒为 -119.1° */
-#define CHASSIS_DEBUG_NO_GIMBAL
+// #define CHASSIS_DEBUG_NO_GIMBAL
 
 #if defined(CHASSIS_MECANUM) && defined(CHASSIS_OMNI)
 #error "Only one chassis type can be defined!"
@@ -211,7 +211,7 @@ typedef struct
 typedef struct
 {
     attitude_t gimbal_imu_data;
-    uint16_t yaw_motor_single_round_angle;
+    float  yaw_motor_single_round_angle;
 } Gimbal_Upload_Data_s;
 
 typedef struct
