@@ -21,13 +21,6 @@ static Gimbal_Ctrl_Cmd_s gimbal_cmd_recv;         // 来自cmd的控制信息
 static gimbal_mode_e prev_gimbal_mode = GIMBAL_ZERO_FORCE;
 static float yaw_align_off = 0.0f, pitch_align_off = 0.0f;
 
-/* ============================================================
- * 达妙 4310 独立测试开关
- *   1 = 测试模式: 完全绕过遥控, 用下面的变量控制 (推荐先跑这个)
- *   0 = 正式模式: 跟着 gimbal_cmd_recv.pitch 走 (上云台后再切)
- * ============================================================ */
-#define DM_PITCH_TEST   0
-
 /* 测试总开关: 1=允许出力, 0=立刻卸力(急停用)
  * 用 EmberProbe 改即可, 不依赖遥控器 */
 volatile uint8_t dm_test_enable = 1;
@@ -42,7 +35,7 @@ static float pitch_imu_rad  = 0.0f;
 static float pitch_gyro_rad = 0.0f;
 
 /* 重力前馈: τ = K × cos(pitch), K 可在 EmberProbe 里实时改 */
-volatile float pitch_gravity_k  = -0.65f;    /* 0 = 关闭, 标定时从 0.2 起 */
+volatile float pitch_gravity_k  = -0.9f;    /* 0 = 关闭, 标定时从 0.2 起 */
 static   float pitch_gravity_ff = 0.0f;
 static   float pitch_soft_start = 0.0f;   /* 0~1, 使能后 0.3s 线性拉满 */
 static   float pitch_cmd_ramp   = 0.0f;   /* 实际送给 PID 的目标, 斜坡跟随 */
@@ -103,21 +96,21 @@ void GimbalInit()
         },
         .controller_param_init_config = {
             .angle_PID = {
-                .Kp = -3.0f,             /* 负号: 物理上负力矩 = 抬头, 而 PID 约定正误差 = 正输出 */
+                .Kp = -4.0f,             /* 负号: 物理上负力矩 = 抬头, 而 PID 约定正误差 = 正输出 */
                 .Ki = 0.0f,
-                .Kd = 0.0f,
+                .Kd = 0.2f,
                 .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
                 .IntegralLimit = 1.0f,  // 积分最多贡献 1 rad/s
                 .MaxOut = 6.0f,      
             },
             .speed_PID = {
-                .Kp = 0.5f,
-                .Ki = 0.0f,            // 先给很小, 排除积分反冲
+                .Kp = 0.7f,
+                .Ki = 0.03f,            // 先给很小, 排除积分反冲
                 .Kd = 0.0f,
                 .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
-                .IntegralLimit = 0.5f,  // 积分最多贡献 0.5 N·m
-                .MaxOut = 3.0f,       
-                .Output_LPF_RC = 0.012f,   /* 新增: 输出低通, 抑制振荡 */
+                .IntegralLimit = 0.3f,  // 积分最多贡献 0.3 N·m
+                .MaxOut = 2.5f,       
+                .Output_LPF_RC = 0.015f,   /* 新增: 输出低通, 抑制振荡 */
             },
             /* ← 补这两个, 否则 OTHER_FEED 解引用 NULL */
             .other_angle_feedback_ptr = &pitch_imu_rad,
@@ -170,16 +163,26 @@ void GimbalTask()
     // 后续增加未收到数据的处理
     SubGetMessage(gimbal_sub, &gimbal_cmd_recv);
 
-    /* 重力前馈: 力矩随 cos(俯仰角) 变化, 水平最大、垂直为零 */
-    /* 使能软启动: 从 ZERO_FORCE 切回后, 用 0.3s 把前馈从 0 拉到全额,
-     * 避免 torque 从 0 阶跃到 -0.45 把枪管弹飞 */
+    /* 软启动: 短暂丢帧(gimbal_mode 掉几帧)时不要把 ramp 清零,
+     * 否则 MaxOut 一直被压到 0, PID 等于没开 */
+    static uint16_t zf_cnt = 0;
+
     if (gimbal_cmd_recv.gimbal_mode == GIMBAL_ZERO_FORCE)
+    {
+        if (zf_cnt < 40) zf_cnt++;              /* 40 × 5ms = 200ms 容错 */
+    }
+    else
+    {
+        zf_cnt = 0;
+    }
+
+    if (zf_cnt >= 40)                           /* 真的停了才清零 */
     {
         pitch_soft_start = 0.0f;
     }
     else
     {
-        pitch_soft_start += 0.005f / 0.8f;      /* 5ms 周期 → 0.8s 到 1 */
+        pitch_soft_start += 0.005f / 0.3f;      /* 5ms 周期 → 0.3s 拉满 */
         if (pitch_soft_start > 1.0f) pitch_soft_start = 1.0f;
     }
 
@@ -235,48 +238,6 @@ void GimbalTask()
     }
     prev_gimbal_mode = gimbal_cmd_recv.gimbal_mode;
 
-    // @todo:现在已不再需要电机反馈,实际上可以始终使用IMU的姿态数据来作为云台的反馈,yaw电机的offset只是用来跟随底盘
-    // 根据控制模式进行电机反馈切换和过渡,视觉模式在robot_cmd模块就已经设置好,gimbal只看yaw_ref和pitch_ref
-#if DM_PITCH_TEST
-    /* ============ 达妙测试: 完全不依赖遥控 ============ */
-    if (!dm_test_enable)
-    {
-        DMMotorStop(pitch_motor);       /* 急停: 力矩清零 */
-    }
-    else
-    {
-        DMMotorEnable(pitch_motor);
-
-        if (dm_test_mode == 1)          /* 速度环 */
-        {
-            DMMotorOuterLoop(pitch_motor, SPEED_LOOP);
-            DMMotorSetRef(pitch_motor, dm_target_speed);
-        }
-        else if (dm_test_mode == 2)     /* 定点位置环 */
-        {
-            DMMotorOuterLoop(pitch_motor, ANGLE_LOOP);
-            DMMotorSetRef(pitch_motor, dm_target_angle);
-        }
-        else if (dm_test_mode == 3)     /* 正弦往复 */
-        {
-            float t = DWT_GetTimeline_s();
-            DMMotorOuterLoop(pitch_motor, ANGLE_LOOP);
-            DMMotorSetRef(pitch_motor, 1.0f * arm_sin_f32(2.0f * 3.14159265f * 0.5f * t));
-        }
-        else                            /* mode 0: 零力矩, 只验通信 */
-        {
-            DMMotorOuterLoop(pitch_motor, SPEED_LOOP);
-            DMMotorSetRef(pitch_motor, 0.0f);
-        }
-    }
-
-    /* yaw 照常跟随遥控(测试期间不受影响) */
-    DJIMotorEnable(yaw_motor);
-    if (!yaw_zero_done) DJIMotorStop(yaw_motor);
-    DJIMotorSetRef(yaw_motor, gimbal_cmd_recv.yaw + yaw_mech_off);
-
-#else
-    /* ================= 正式模式(上云台后切 DM_PITCH_TEST = 0) ================= */
     switch (gimbal_cmd_recv.gimbal_mode)
     {
     case GIMBAL_ZERO_FORCE:                     /* 停止 */
@@ -324,7 +285,6 @@ void GimbalTask()
     default:
         break;
     }
-#endif
 
     // 设置反馈数据,主要是imu和yaw的ecd
     gimbal_feedback_data.gimbal_imu_data = *gimba_IMU_data;

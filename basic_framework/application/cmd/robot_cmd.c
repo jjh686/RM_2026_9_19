@@ -480,13 +480,23 @@ static void MouseKeySet()
  */
 static void EmergencyHandler(void)
 {
-    uint8_t sb = rc_compat[TEMP].rc.switch_right;
-    uint8_t in_match = (GetRefereeData()->GameState.game_progress == 4); // 正式比赛进行中
+    uint8_t sc       = rc_compat[TEMP].rc.switch_right;   /* CH8: 上档 = 急停 */
+    uint8_t online   = RemoteControlIsOnline();
+    uint8_t in_match = (GetRefereeData()->GameState.game_progress == 4);
 
-    /* 遥控器在线且SB在中/下档，或者正式比赛进行中且遥控器已关控，才允许运行 */
+    /* 丢帧消抖: SBUS 偶发丢帧很常见(离线回调还会 memset rc_ctrl),
+     * 连续 300ms 收不到才认为真的离线; 但 SC 上档必须立刻停。
+     * 初值给满 60, 避免上电时"还没连上遥控器"却被判为允许运行 300ms */
+    static uint16_t offline_cnt = 60;
+
+    if (online)
+        offline_cnt = 0;
+    else if (offline_cnt < 60)
+        offline_cnt++;                       /* 60 × 5ms = 300ms */
+
     uint8_t allow_run =
-        (RemoteControlIsOnline() && (switch_is_mid(sb) || switch_is_down(sb))) ||
-        (!RemoteControlIsOnline() && in_match);
+        (!switch_is_up(sc)) &&               /* SC 上档 → 立刻急停 */
+        (online || offline_cnt < 60 || in_match);
 
     if (!allow_run)
     {
@@ -502,6 +512,7 @@ static void EmergencyHandler(void)
 
         gimbal_cmd_send.gimbal_mode = GIMBAL_ZERO_FORCE;
         gimbal_cmd_send.pitch = 0.0f;      /* ← 新增: 急停时清空累积目标 */
+        gimbal_cmd_send.yaw   = 0.0f;      /* ← 新增 */
 
         shoot_cmd_send.shoot_mode = SHOOT_OFF;
         shoot_cmd_send.friction_mode = FRICTION_OFF;
@@ -509,7 +520,7 @@ static void EmergencyHandler(void)
         return;
     }
 
-    /* 在线且 SB 回到中/下档，立即解除急停 */
+    /* 在线且 sc 回到中/下档，立即解除急停 */
     if (robot_state == ROBOT_STOP)
     {
         robot_state = ROBOT_READY;
