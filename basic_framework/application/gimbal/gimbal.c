@@ -18,24 +18,16 @@ static Subscriber_t *gimbal_sub;                  // cmd控制消息订阅者
 static Gimbal_Upload_Data_s gimbal_feedback_data; // 回传给cmd的云台状态信息
 static Gimbal_Ctrl_Cmd_s gimbal_cmd_recv;         // 来自cmd的控制信息
 
-static gimbal_mode_e prev_gimbal_mode = GIMBAL_ZERO_FORCE;
-static float yaw_align_off = 0.0f, pitch_align_off = 0.0f;
-
-/* 测试总开关: 1=允许出力, 0=立刻卸力(急停用)
- * 用 EmberProbe 改即可, 不依赖遥控器 */
-volatile uint8_t dm_test_enable = 1;
-
 static float   yaw_mech_off  = 0.0f;
 static uint8_t yaw_zero_done = 0;
 static float   pitch_zero_off  = 0.0f;    /* pitch 上电位置基准(弧度) */
-static uint8_t pitch_zero_done = 0;
 
 /* 顶部 */
 static float pitch_imu_rad  = 0.0f;
 static float pitch_gyro_rad = 0.0f;
 
 /* 重力前馈: τ = K × cos(pitch), K 可在 EmberProbe 里实时改 */
-volatile float pitch_gravity_k  = -0.9f;    /* 0 = 关闭, 标定时从 0.2 起 */
+volatile float pitch_gravity_k  = -0.75f;    /* 0 = 关闭*/
 static   float pitch_gravity_ff = 0.0f;
 static   float pitch_soft_start = 0.0f;   /* 0~1, 使能后 0.3s 线性拉满 */
 static   float pitch_cmd_ramp   = 0.0f;   /* 实际送给 PID 的目标, 斜坡跟随 */
@@ -96,21 +88,23 @@ void GimbalInit()
         },
         .controller_param_init_config = {
             .angle_PID = {
-                .Kp = -4.0f,             /* 负号: 物理上负力矩 = 抬头, 而 PID 约定正误差 = 正输出 */
+                .Kp = -4.5f,             /* 负号: 物理上负力矩 = 抬头, 而 PID 约定正误差 = 正输出 */
                 .Ki = 0.0f,
-                .Kd = 0.2f,
+                .Kd = 0.0f,
                 .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
                 .IntegralLimit = 1.0f,  // 积分最多贡献 1 rad/s
-                .MaxOut = 6.0f,      
+                .MaxOut = 5.5f,      
+                .DeadBand = 0.005f,
             },
             .speed_PID = {
                 .Kp = 0.7f,
-                .Ki = 0.03f,            // 先给很小, 排除积分反冲
+                .Ki = 0.05f,            // 先给很小, 排除积分反冲
                 .Kd = 0.0f,
                 .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
-                .IntegralLimit = 0.3f,  // 积分最多贡献 0.3 N·m
-                .MaxOut = 2.5f,       
+                .IntegralLimit = 0.25f,  // 积分最多贡献 0.25N·m
+                .MaxOut = 4.5f,       
                 .Output_LPF_RC = 0.015f,   /* 新增: 输出低通, 抑制振荡 */
+                .DeadBand = 0.01f,
             },
             /* ← 补这两个, 否则 OTHER_FEED 解引用 NULL */
             .other_angle_feedback_ptr = &pitch_imu_rad,
@@ -163,6 +157,13 @@ void GimbalTask()
     // 后续增加未收到数据的处理
     SubGetMessage(gimbal_sub, &gimbal_cmd_recv);
 
+/* GimbalTask 开头(SubGetMessage 之后) */
+    /* ⚠️ 轴系: Pitch 绕 X 轴 → Gyro[0]; Roll 绕 Y 轴 → Gyro[1]
+     * 先按 Pitch/Gyro[0] 配, 上电卸力后手托枪管抬头, 看 EmberProbe 里
+     * 是 Pitch 还是 Roll 在变 —— 变的那个才是俯仰轴, 用它和同轴陀螺 */
+    pitch_imu_rad  = -gimba_IMU_data->Pitch * DEGREE_2_RAD;
+    pitch_gyro_rad = gimba_IMU_data->Gyro[0];      /* 已是 rad/s, 不要再乘 */
+
     /* 软启动: 短暂丢帧(gimbal_mode 掉几帧)时不要把 ramp 清零,
      * 否则 MaxOut 一直被压到 0, PID 等于没开 */
     static uint16_t zf_cnt = 0;
@@ -188,16 +189,9 @@ void GimbalTask()
 
     pitch_gravity_ff = pitch_gravity_k * arm_cos_f32(pitch_imu_rad) * pitch_soft_start;
 
-    /* 让 PID 输出上限也参与软启动: 使能后从 0 慢慢放到 3.0 N·m */
-    if (pitch_motor != NULL)
-        pitch_motor->speed_PID.MaxOut = 3.0f * pitch_soft_start;
-
-/* GimbalTask 开头(SubGetMessage 之后) */
-    /* ⚠️ 轴系: Pitch 绕 X 轴 → Gyro[0]; Roll 绕 Y 轴 → Gyro[1]
-     * 先按 Pitch/Gyro[0] 配, 上电卸力后手托枪管抬头, 看 EmberProbe 里
-     * 是 Pitch 还是 Roll 在变 —— 变的那个才是俯仰轴, 用它和同轴陀螺 */
-    pitch_imu_rad  = -gimba_IMU_data->Pitch * DEGREE_2_RAD;
-    pitch_gyro_rad = gimba_IMU_data->Gyro[0];      /* 已是 rad/s, 不要再乘 */
+    // /* 让 PID 输出上限也参与软启动: 使能后从 0 慢慢放到 3.0 N·m */
+    // if (pitch_motor != NULL)
+    //     pitch_motor->speed_PID.MaxOut = 3.0f * pitch_soft_start;
 
     /* ---------- 切档原地接管 ----------
      * 从 ZERO_FORCE(急停) 切回使能时, 把上电基准重新对齐到当前姿态,
@@ -207,7 +201,6 @@ void GimbalTask()
     if (prev_gimbal_mode == GIMBAL_ZERO_FORCE &&
         gimbal_cmd_recv.gimbal_mode != GIMBAL_ZERO_FORCE)
     {
-        /* 配合 tgt 的取反: 上电要满足 -(pitch×0.01745 + zero) = imu */
         pitch_zero_off = 0.0f;
     }
     prev_gimbal_mode = gimbal_cmd_recv.gimbal_mode;
@@ -232,12 +225,6 @@ void GimbalTask()
         yaw_zero_done = 1;
     }
 
-    if (gimbal_cmd_recv.gimbal_mode == GIMBAL_GYRO_MODE && prev_gimbal_mode != GIMBAL_GYRO_MODE)
-    {
-        pitch_align_off = 0.0f;   /* pitch 用 IMU 绝对角, 水平为 0 */
-    }
-    prev_gimbal_mode = gimbal_cmd_recv.gimbal_mode;
-
     switch (gimbal_cmd_recv.gimbal_mode)
     {
     case GIMBAL_ZERO_FORCE:                     /* 停止 */
@@ -254,8 +241,7 @@ void GimbalTask()
 
         DJIMotorSetRef(yaw_motor, gimbal_cmd_recv.yaw + yaw_mech_off);
 
-        /* 双保险: 即使上层 pitch 累积失控, 也把目标钳在机械行程内
-         * LIM 取 PITCH_MAX_ANGLE, 和 robot_cmd.c 的软限位共用同一个宏 */
+        /* 双保险: 即使上层 pitch 累积失控, 也把目标钳在机械行程内*/
         {
             const float LIM_UP   = PITCH_MAX_ANGLE * DEGREE_2_RAD;
             const float LIM_DOWN = PITCH_MIN_ANGLE * DEGREE_2_RAD;
@@ -265,10 +251,9 @@ void GimbalTask()
             if (tgt > pitch_zero_off + LIM_UP)   tgt = pitch_zero_off + LIM_UP;
             if (tgt < pitch_zero_off + LIM_DOWN) tgt = pitch_zero_off + LIM_DOWN;
 
-            /* 目标斜坡: 每周期最多走 1.5 rad/s ≈ 86°/s, 让误差始终很小 */
             {
                 float diff = tgt - pitch_cmd_ramp;
-                const float STEP = 1.5f * 0.005f;      /* 1.5 rad/s × 5ms */
+                const float STEP = 1.8f * 0.005f;      /* 1.8 rad/s × 5ms */
 
                 if (diff >  STEP) diff =  STEP;
                 if (diff < -STEP) diff = -STEP;
