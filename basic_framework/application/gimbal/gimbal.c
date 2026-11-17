@@ -87,23 +87,23 @@ void GimbalInit()
         },
         .controller_param_init_config = {
             .angle_PID = {
-                .Kp = -4.5f,             /* 负号: 物理上负力矩 = 抬头, 而 PID 约定正误差 = 正输出 */
+                .Kp = -4.4f,             /* 负号: 物理上负力矩 = 抬头, 而 PID 约定正误差 = 正输出 */
                 .Ki = 0.0f,
                 .Kd = 0.0f,
                 .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
                 .IntegralLimit = 1.0f,  // 积分最多贡献 1 rad/s
-                .MaxOut = 5.5f,      
+                .MaxOut = 5.4f,      
                 .DeadBand = 0.005f,
             },
             .speed_PID = {
-                .Kp = 0.7f,
+                .Kp = 0.69f,
                 .Ki = 0.05f,            // 先给很小, 排除积分反冲
                 .Kd = 0.0f,
                 .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
                 .IntegralLimit = 0.25f,  // 积分最多贡献 0.25N·m
-                .MaxOut = 4.5f,       
-                .Output_LPF_RC = 0.015f,   /* 新增: 输出低通, 抑制振荡 */
-                .DeadBand = 0.01f,
+                .MaxOut = 4.4f,       
+                .Output_LPF_RC = 0.02f,   /* 新增: 输出低通, 抑制振荡 */
+                .DeadBand = 0.0f,
             },
             /* ← 补这两个, 否则 OTHER_FEED 解引用 NULL */
             .other_angle_feedback_ptr = &pitch_imu_rad,
@@ -229,7 +229,8 @@ void GimbalTask()
     case GIMBAL_ZERO_FORCE:                     /* 停止 */
         DJIMotorStop(yaw_motor);
         DMMotorStop(pitch_motor);
-        pitch_cmd_ramp = pitch_imu_rad;         /* ← 新增: 卸力时跟随当前姿态 */
+        if (zf_cnt >= 40)                       /* 真停了才同步, 短暂丢帧不动 */
+            pitch_cmd_ramp = pitch_imu_rad;
         break;
 
     case GIMBAL_GYRO_MODE:                      /* 陀螺仪模式 */
