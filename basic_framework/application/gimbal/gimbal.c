@@ -2,8 +2,7 @@
 #include "robot_def.h"
 #include "dji_motor.h"
 #include "dmmotor.h"          // ← 新增
-#include "arm_math.h"    // arm_sin_f32 (只有 dm_test_mode == 3 用到)
-#include "bsp_dwt.h"     // DWT_GetTimeline_s (同上, 如果 general_def.h 没带的话)
+#include "arm_math.h"    // arm_cos_f32 (重力前馈 cos(imu) 用到)
 #include "ins_task.h"
 #include "message_center.h"
 #include "general_def.h"
@@ -112,9 +111,9 @@ void GimbalInit()
             .force_feedforward_ptr    = &pitch_gravity_ff,     /* 新增 */
         },
         .controller_setting_init_config = {
-            .angle_feedback_source = OTHER_FEED,   // 测试期用电机编码器
-            .speed_feedback_source = OTHER_FEED,   
-            .outer_loop_type = ANGLE_LOOP,         // 默认先测角度环
+            .angle_feedback_source = OTHER_FEED,   /* 角度环反馈 = IMU 绝对角 pitch_imu_rad */
+            .speed_feedback_source = OTHER_FEED,   /* 速度环反馈 = 陀螺 pitch_gyro_rad */
+            .outer_loop_type = ANGLE_LOOP,         /* 串级外环 = 角度环 */
             .close_loop_type = ANGLE_LOOP | SPEED_LOOP,
             .motor_reverse_flag = MOTOR_DIRECTION_NORMAL,  
             .feedforward_flag = FORCE_FEEDFORWARD,              /* 新增 */
