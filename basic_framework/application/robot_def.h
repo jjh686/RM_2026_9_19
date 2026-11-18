@@ -18,8 +18,8 @@
 
 /* 开发板类型定义,烧录时注意不要弄错对应功能;修改定义后需要重新编译,只能存在一个定义! */
 // #define ONE_BOARD // 单板控制整车
-// #define CHASSIS_BOARD //底盘板
-#define GIMBAL_BOARD  //云台板
+#define CHASSIS_BOARD //底盘板
+// #define GIMBAL_BOARD  //云台板
 
 #define VISION_USE_VCP  // 使用虚拟串口发送视觉数据
 // #define VISION_USE_UART // 使用串口发送视觉数据
@@ -31,8 +31,8 @@
 #define PITCH_HORIZON_ECD 3412      // 云台处于水平位置时编码器值,若对云台有机械改动需要修改
 #define PITCH_MAX_ANGLE 4.5f        // 云台竖直方向最大角度 (相对 0 位, 0 位 = IMU 水平)
 #define PITCH_MIN_ANGLE -31.5f      // 云台竖直方向最小角度
-#define YAW_MAX_ANGLE   90.0f       // 云台水平方向最大角度 (相对机械中位)
-#define YAW_MIN_ANGLE   -90.0f      // 云台水平方向最小角度
+// #define YAW_MAX_ANGLE   90.0f       // 云台水平方向最大角度 (相对机械中位)
+// #define YAW_MIN_ANGLE   -90.0f      // 云台水平方向最小角度
 // 发射参数
 #define ONE_BULLET_DELTA_ANGLE 36    // 发射一发弹丸拨盘转动的距离,由机械设计图纸给出
 #define REDUCTION_RATIO_LOADER 36.0f // 2006拨盘电机的减速比,英雄需要修改为3508的19.0f

@@ -1,4 +1,5 @@
 #include "motor_task.h"
+#include "gimbal.h"      // GimbalUpdateYawGyroDeg
 #include "LK9025.h"
 #include "HT04.h"
 #include "dji_motor.h"
@@ -12,6 +13,7 @@ void MotorControlTask()
     // static uint8_t cnt = 0; 设定不同电机的任务频率
     // if(cnt%5==0) //200hz
     // if(cnt%10==0) //100hz
+    GimbalUpdateYawGyroDeg();   /* 1kHz 刷新 yaw 陀螺(度/秒), 速度内环用 */
     DJIMotorControl();
     PowerControl();
     /* 如果有对应的电机则取消注释,可以加入条件编译或者register对应的idx判断是否注册了电机 */

@@ -30,14 +30,15 @@
             "makeArgs": ["-j24"]
         }
     ],
-    "cortex-debug.armToolchainPath": "D:\\MSYS2\\ucrt64\\bin",
-    "cortex-debug.gdbPath.windows": "D:\\BaiduNetdiskDownload\\RM\\archive\\EC\\VSCode+Ozone环境配置\\gcc-arm-none-eabi-10.3-2021.10-win32\\Arm-GNU-Toolchian\\bin\\arm-none-eabi-gdb.exe",
+    "cortex-debug.armToolchainPath": "C:\\Program Files (x86)\\Arm GNU Toolchain arm-none-eabi\\14.2 rel1\\bin",
+    "cortex-debug.gdbPath.windows": "C:\\Program Files (x86)\\Arm GNU Toolchain arm-none-eabi\\14.2 rel1\\bin\\arm-none-eabi-gdb.exe",
     "cortex-debug.openocdPath": "D:\\MSYS2\\mingw64\\bin\\openocd.exe",
     "cortex-debug.JLinkGDBServerPath": "D:\\Jlink\\JLinkGDBServerCL.exe",
 
     "emberprobe.openocdPath": "D:\\MSYS2\\mingw64\\bin\\openocd.exe",
-    "emberprobe.gdbPath": "D:\\BaiduNetdiskDownload\\RM\\archive\\EC\\VSCode+Ozone环境配置\\gcc-arm-none-eabi-10.3-2021.10-win32\\Arm-GNU-Toolchian\\bin\\arm-none-eabi-gdb.exe",
-    "emberprobe.armToolchainPath": "D:\\BaiduNetdiskDownload\\RM\\archive\\EC\\VSCode+Ozone环境配置\\gcc-arm-none-eabi-10.3-2021.10-win32\\Arm-GNU-Toolchian\\bin",
+    "emberprobe.gdbPath": "C:\\Program Files (x86)\\Arm GNU Toolchain arm-none-eabi\\14.2 rel1\\bin\\arm-none-eabi-gdb.exe",
+    "emberprobe.armToolchainPath": "C:\\Program Files (x86)\\Arm GNU Toolchain arm-none-eabi\\14.2 rel1\\bin",
+    "emberprobe.objdumpPath": "C:\\Program Files (x86)\\Arm GNU Toolchain arm-none-eabi\\14.2 rel1\\bin\\arm-none-eabi-objdump.exe",
     "emberprobe.rtos": "FreeRTOS",
     "emberprobe.transport": "swd",
     "emberprobe.sampleFrequencyHz": 30,

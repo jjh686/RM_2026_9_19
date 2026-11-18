@@ -50,6 +50,12 @@ static Subscriber_t *shoot_feed_sub;         // 发射反馈信息订阅者
 static Shoot_Ctrl_Cmd_s shoot_cmd_send;      // 传递给发射的控制信息
 static Shoot_Upload_Data_s shoot_fetch_data; // 从发射获取的反馈信息
 
+/* ---------------- 调试计数(只在 EmberProbe 里看, 不参与控制) ---------------- */
+volatile uint32_t dbg_rc_lost   = 0;   /* RemoteControlIsOnline()==0 的帧数 */
+volatile uint32_t dbg_sc_up_raw = 0;   /* 原始 SC 读到"上档"的帧数 */
+volatile uint32_t dbg_sc_up_cfm = 0;   /* 消抖后判定为急停的帧数 */
+volatile uint32_t dbg_estop     = 0;   /* allow_run 由 1→0 的次数(应为 0) */
+
 static Robot_Status_e robot_state; // 机器人整体工作状态
 
 BMI088Instance *bmi088_test; // 云台IMU
@@ -198,6 +204,22 @@ void RobotCMDInit()
 }
 
 /**
+ * @brief yaw 原地接管: 把目标设成"当前相对机械中位的偏差", 切档后不转回中位
+ * @note  gimbal_cmd_send.yaw 是相对机械中位的偏差角(不是绝对角), 把当前偏差
+ *        归一到 ±180 后赋给它, 使 SetRef ≈ 当前实际角位 -> 切档瞬间不动。
+ *        ⚠️ 依赖 YAW_CHASSIS_ALIGN_ECD 标定正确, 否则会锁死一个固定偏差。
+ */
+static void YawSetCurrent(void)
+{
+    float cur_yaw = (float)gimbal_fetch_data.yaw_motor_single_round_angle - YAW_ALIGN_ANGLE;
+
+    while (cur_yaw >  180.0f) cur_yaw -= 360.0f;
+    while (cur_yaw < -180.0f) cur_yaw += 360.0f;
+
+    gimbal_cmd_send.yaw = cur_yaw;
+}
+
+/**
  * @brief 根据gimbal app传回的当前电机角度计算和零位的误差
  *        单圈绝对角度的范围是0~360,说明文档中有图示
  *
@@ -238,6 +260,27 @@ static uint8_t IsInMatch(void)
  * @brief 控制输入为遥控器(调试时)的模式和控制量设置
  *
  */
+/* CH8(SC) 上档确认: 连续 2 帧(10ms) 才算真急停。
+ * SBUS 偶发坏帧可能把 SC 误解成"上档", 单帧误判会让云台卸力一下(抽搐)。
+ * 只在 RobotCMDTask 里每周期更新一次, 其他函数直接读 sc_up_confirmed。 */
+static uint8_t sc_up_confirmed = 0;
+
+static void UpdateScUpConfirmed(void)
+{
+    static uint8_t cnt = 0;
+
+    if (switch_is_up(rc_compat[TEMP].rc.switch_right))
+    {
+        if (cnt < 2) cnt++;
+    }
+    else
+    {
+        cnt = 0;
+    }
+
+    sc_up_confirmed = (cnt >= 2) ? 1u : 0u;
+}
+
 static void RemoteControlSet()
 {
     // 控制底盘和云台运行模式,云台待添加,云台是否始终使用IMU数据?
@@ -254,13 +297,13 @@ static void RemoteControlSet()
         gimbal_cmd_send.gimbal_mode = GIMBAL_FREE_MODE;
     }
 
-    else if (switch_is_up(rc_compat[TEMP].rc.switch_right))
+    else if (sc_up_confirmed)   /* SC 上档(已消抖) */
     {
         chassis_cmd_send.chassis_mode = CHASSIS_ZERO_FORCE;
         chassis_cmd_send.wz = 0.0f;
         gimbal_cmd_send.gimbal_mode = GIMBAL_ZERO_FORCE;
         gimbal_cmd_send.pitch = 0.0f;      /* 急停清空累积目标 */
-        gimbal_cmd_send.yaw   = 0.0f;
+        YawSetCurrent();                   /* yaw: 原地接管, 不转回中位 */
     }
 
     /* 1. 云台控制 */
@@ -280,14 +323,14 @@ static void RemoteControlSet()
     else if (robot_state == ROBOT_READY)
     {
         // 左开关[下]或视觉无目标: 遥控器摇杆控制云台
-        gimbal_cmd_send.yaw   -= 0.0007f * (float)rc_compat[TEMP].rc.rocker_l_;
+        gimbal_cmd_send.yaw   -= 0.0007f * (float)rc_compat[TEMP].rc.rocker_l_;   /* 0.005 = 660°/s 远超云台能力(300°/s), 会一直饱和->抖 */
         gimbal_cmd_send.pitch += 0.0003f * (float)rc_compat[TEMP].rc.rocker_l1;
 
         /* 云台软限位: 防止累积目标超出机械行程 */
         if (gimbal_cmd_send.pitch > PITCH_MAX_ANGLE) gimbal_cmd_send.pitch = PITCH_MAX_ANGLE;
         if (gimbal_cmd_send.pitch < PITCH_MIN_ANGLE) gimbal_cmd_send.pitch = PITCH_MIN_ANGLE;
-        if (gimbal_cmd_send.yaw   > YAW_MAX_ANGLE)   gimbal_cmd_send.yaw   = YAW_MAX_ANGLE;
-        if (gimbal_cmd_send.yaw   < YAW_MIN_ANGLE)   gimbal_cmd_send.yaw   = YAW_MIN_ANGLE;
+        // if (gimbal_cmd_send.yaw   > YAW_MAX_ANGLE)   gimbal_cmd_send.yaw   = YAW_MAX_ANGLE;
+        // if (gimbal_cmd_send.yaw   < YAW_MIN_ANGLE)   gimbal_cmd_send.yaw   = YAW_MIN_ANGLE;
     }
 
     /* 2. 底盘速度控制: 左开关[中]由上位机导航控制, 左开关[下]由遥控器摇杆控制 */
@@ -375,7 +418,7 @@ static void SentryAutoSet(void)
         chassis_cmd_send.wz = 0.0f;
         gimbal_cmd_send.gimbal_mode = GIMBAL_ZERO_FORCE;
         gimbal_cmd_send.pitch = 0.0f;      /* 急停清空累积目标 */
-        gimbal_cmd_send.yaw   = 0.0f;
+        YawSetCurrent();                   /* yaw: 原地接管, 不转回中位 */
         return;
     }
 
@@ -509,13 +552,44 @@ static void MouseKeySet()
  */
 static void EmergencyHandler(void)
 {
-    uint8_t sb = rc_compat[TEMP].rc.switch_right;
+    uint8_t sc = rc_compat[TEMP].rc.switch_right;   /* CH8 = SC, 上档 = 急停 */
     uint8_t in_match = IsInMatch();
 
-    /* 遥控器在线且SB在中/下档，或者正式比赛进行中且遥控器已关控，才允许运行 */
-    uint8_t allow_run =
-        (RemoteControlIsOnline() && (switch_is_mid(sb) || switch_is_down(sb))) ||
-        (!RemoteControlIsOnline() && in_match);
+    /* ① SC 上档(已消抖, 见 UpdateScUpConfirmed: 连续 2 帧才算真急停) */
+    uint8_t sc_up = sc_up_confirmed;
+
+    /* ② 离线容忍: SBUS 偶发丢帧很常见(离线回调还会 memset rc_ctrl 把档位清 0),
+     *    连续 200ms 收不到才认为真的离线。否则每掉一帧就卸力 -> 云台一抖一抖。 */
+    static uint16_t off_cnt = 40;                   /* 初值给满, 避免上电就误允许 */
+    if (RemoteControlIsOnline())
+        off_cnt = 0;
+    else if (off_cnt < 40)
+        off_cnt++;                                  /* 40 × 5ms = 200ms */
+    uint8_t online_tol = (off_cnt < 40);
+
+    /* ③ 允许运行: SC 非上档 且 (在线 或 丢帧未超时); 比赛中关控仍允许 */
+    uint8_t allow_raw =
+        (!sc_up && online_tol) || (!online_tol && in_match);
+
+    /* ④ 恢复消抖: 必须连续 3 帧(15ms) 才解除急停 */
+    static uint8_t run_cnt = 0;
+
+    if (!allow_raw)
+        run_cnt = 0;
+    else if (run_cnt < 3)
+        run_cnt++;
+
+    uint8_t allow_run = (run_cnt >= 3);
+
+    /* 调试计数 */
+    if (!RemoteControlIsOnline())                      dbg_rc_lost++;
+    if (switch_is_up(rc_compat[TEMP].rc.switch_right)) dbg_sc_up_raw++;
+    if (sc_up)                                         dbg_sc_up_cfm++;
+    {
+        static uint8_t prev_allow = 1;
+        if (prev_allow && !allow_run) dbg_estop++;
+        prev_allow = allow_run;
+    }
 
     if (!allow_run)
     {
@@ -531,7 +605,7 @@ static void EmergencyHandler(void)
 
         gimbal_cmd_send.gimbal_mode = GIMBAL_ZERO_FORCE;
         gimbal_cmd_send.pitch = 0.0f;      /* 急停清空累积目标 */
-        gimbal_cmd_send.yaw   = 0.0f;
+        YawSetCurrent();                   /* yaw: 原地接管, 不转回中位 */
 
         shoot_cmd_send.shoot_mode = SHOOT_OFF;
         shoot_cmd_send.friction_mode = FRICTION_OFF;
@@ -552,6 +626,7 @@ static void EmergencyHandler(void)
 void RobotCMDTask()
 {
     FS2RC_Adapt(); // 必须放在所有读取遥控器数据之前
+    UpdateScUpConfirmed(); // SC 上档消抖, 每周期更新一次(其他函数只读 sc_up_confirmed)
     // BMI088Acquire(bmi088_test,&bmi088_data) ;
     // 从其他应用获取回传数据
 #ifdef ONE_BOARD

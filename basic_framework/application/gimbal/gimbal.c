@@ -19,6 +19,21 @@ static Gimbal_Ctrl_Cmd_s gimbal_cmd_recv;         // 来自cmd的控制信息
 
 static float   yaw_mech_off  = 0.0f;
 static uint8_t yaw_zero_done = 0;
+
+/* yaw 陀螺角速度 rad/s → 度/秒, 给速度内环(OTHER_FEED)用。
+ * ⚠️ 必须是非 volatile 的普通 float: other_speed_feedback_ptr 的类型是 float*,
+ *    给 volatile float* 会触发 -Werror=discarded-qualifiers。
+ * ⚠️ 必须在 1kHz 的 MotorControlTask 里刷新(见 GimbalUpdateYawGyroDeg),
+ *    若放在 200Hz 的 GimbalTask, 速度内环会拿到 5ms 阶梯值 -> Kp=80 下力矩纹波。 */
+float yaw_gyro_deg = 0.0f;
+
+/* 调试计数: 云台实际处于"卸力"状态的帧数(1 帧 = 5ms), 只在 EmberProbe 里看 */
+volatile uint32_t dbg_gimbal_stop_frm = 0;
+
+/* IMU yaw 与电机 total_angle 的转向关系:
+ * 上电后若 yaw 越跑越远(正反馈), 把这里改成 (-1.0f) */
+#define YAW_IMU_DIR   (1.0f)
+
 static float   pitch_zero_off  = 0.0f;    /* pitch 上电位置基准(弧度) */
 
 /* 顶部 */
@@ -43,11 +58,11 @@ void GimbalInit()
         },
         .controller_param_init_config = {
             .angle_PID = {
-                .Kp = 8, 
+                .Kp = 6, 
                 .Ki = 0.2f,
                 .Kd = 0,
                 .DeadBand = 0.15f,
-                .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
+                .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement | PID_OutputFilter,
                 .IntegralLimit = 100,
 
                 .MaxOut = 300,
@@ -56,18 +71,18 @@ void GimbalInit()
                 .Kp = 80,  // 80
                 .Ki = 0, 
                 .Kd = 0,
-                .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
+                .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement | PID_OutputFilter,
                 .IntegralLimit = 3000,
-                .MaxOut = 5000,
-                .Output_LPF_RC = 0.5f,
+                .MaxOut = 18000,
+                .Output_LPF_RC = 0.004f,
             },
-            .other_angle_feedback_ptr = &gimba_IMU_data->YawTotalAngle,
-            // 还需要增加角速度额外反馈指针,注意方向,ins_task.md中有c板的bodyframe坐标系说明
-            .other_speed_feedback_ptr = &gimba_IMU_data->Gyro[2],
+            .other_angle_feedback_ptr = &gimba_IMU_data->YawTotalAngle,   /* 度, 带圈数累计, 不会在 360° 跳变 */
+            /* ⚠️ 陀螺是 rad/s, 必须先转成 度/秒 才能给"度"系统的速度环用(相差 57.3 倍) */
+            .other_speed_feedback_ptr = &yaw_gyro_deg,
         },
         .controller_setting_init_config = {
-            .angle_feedback_source = MOTOR_FEED,
-            .speed_feedback_source = OTHER_FEED,
+            .angle_feedback_source = OTHER_FEED,   /* 角度环 = IMU YawTotalAngle(度, 绝对, 带圈数) */
+            .speed_feedback_source = OTHER_FEED,   /* 速度环 = yaw_gyro_deg(度/秒, 1kHz 刷新) */
             .outer_loop_type = ANGLE_LOOP,
             .close_loop_type = ANGLE_LOOP | SPEED_LOOP,
             .motor_reverse_flag = MOTOR_DIRECTION_NORMAL,
@@ -151,6 +166,17 @@ static float pitch_ref_near(float target)
     return cur + err;                       /* PID 的误差 = err, 恒在 ±π 内 */
 }
 
+/**
+ * @brief yaw 陀螺角速度 rad/s → 度/秒
+ * @note  必须在 1kHz 的 MotorControlTask 里调用; 若放在 200Hz 的 GimbalTask,
+ *        速度内环会拿到 5ms 阶梯值, Kp=80 时产生力矩纹波
+ */
+void GimbalUpdateYawGyroDeg(void)
+{
+    if (gimba_IMU_data != NULL)
+        yaw_gyro_deg = gimba_IMU_data->Gyro[2] * RAD_2_DEGREE;
+}
+
 /* 机器人云台控制核心任务,后续考虑只保留IMU控制,不再需要电机的反馈 */
 void GimbalTask()
 {
@@ -194,17 +220,55 @@ void GimbalTask()
     // if (pitch_motor != NULL)
     //     pitch_motor->speed_PID.MaxOut = 3.0f * pitch_soft_start;
 
+    /* ---------- 模式双向消抖 ----------
+     * 新模式必须连续 3 帧(15ms)保持, 才真正切换:
+     *  - 单帧 ZERO_FORCE(坏帧/丢帧) 不再让电机"停一下", 消除一抖一抖;
+     *  - 单帧使能也不会误启动甩脉冲。
+     * 停止延迟: robot_cmd 侧 SC 上档已确认 2 帧(10ms), 这里再 3 帧, 合计 ~25ms,
+     * 人手感觉不到, 但足以滤掉所有单帧抖动。 */
+    static gimbal_mode_e mode_stable = GIMBAL_ZERO_FORCE;
+    static gimbal_mode_e mode_cand   = GIMBAL_ZERO_FORCE;   /* 正在确认的候选模式 */
+    static uint8_t cand_cnt = 0;
+    gimbal_mode_e mode_in = gimbal_cmd_recv.gimbal_mode;
+    gimbal_mode_e mode_eff;
+
+    if (mode_in == mode_stable)
+    {
+        /* 回到稳定值, 取消候选 */
+        cand_cnt = 0;
+        mode_cand = mode_stable;
+    }
+    else if (mode_in == mode_cand)
+    {
+        /* 同一候选连续出现, 计数 */
+        if (cand_cnt < 3) cand_cnt++;
+        if (cand_cnt >= 3)
+        {
+            mode_stable = mode_cand;
+            cand_cnt = 0;
+        }
+    }
+    else
+    {
+        /* 换了个新候选(例如 0 和 2 交替), 重新计数, 不能混算 */
+        mode_cand = mode_in;
+        cand_cnt = 1;
+    }
+
+    mode_eff = mode_stable;
+
+    if (mode_eff == GIMBAL_ZERO_FORCE) dbg_gimbal_stop_frm++;
+
     /* ---------- 切档原地接管 ----------
      * 从 ZERO_FORCE(急停) 切回使能时, 把上电基准重新对齐到当前姿态,
      * 让 SetRef = pitch_imu_rad (误差 0), 云台不跳变 */
     static gimbal_mode_e prev_gimbal_mode = GIMBAL_ZERO_FORCE;
 
-    if (prev_gimbal_mode == GIMBAL_ZERO_FORCE &&
-        gimbal_cmd_recv.gimbal_mode != GIMBAL_ZERO_FORCE)
+    if (prev_gimbal_mode == GIMBAL_ZERO_FORCE && mode_eff != GIMBAL_ZERO_FORCE)
     {
         pitch_zero_off = 0.0f;
     }
-    prev_gimbal_mode = gimbal_cmd_recv.gimbal_mode;
+    prev_gimbal_mode = mode_eff;
 
     /* 电机初始化失败时直接返回, 避免解引用 NULL */
     if (pitch_motor == NULL)
@@ -222,11 +286,12 @@ void GimbalTask()
         if (diff_ecd < -4096.0f) diff_ecd += 8192.0f;
 
         float mech_now = diff_ecd * ECD_ANGLE_COEF_DJI;   /* 单位: 度 */
-        yaw_mech_off  = yaw_motor->measure.total_angle - mech_now;
+        /* 角度环已改为 IMU 绝对角, 基准也必须用 IMU 的 YawTotalAngle(度) */
+        yaw_mech_off  = gimba_IMU_data->YawTotalAngle - YAW_IMU_DIR * mech_now;
         yaw_zero_done = 1;
     }
 
-    switch (gimbal_cmd_recv.gimbal_mode)
+    switch (mode_eff)   /* 用消抖后的模式, 单帧误判不会使能电机 */
     {
     case GIMBAL_ZERO_FORCE:                     /* 停止 */
         DJIMotorStop(yaw_motor);
@@ -241,8 +306,21 @@ void GimbalTask()
         DMMotorEnable(pitch_motor);
         if (!yaw_zero_done) DJIMotorStop(yaw_motor);
 
-        DJIMotorSetRef(yaw_motor, gimbal_cmd_recv.yaw + yaw_mech_off);
+        /* 反馈是 IMU 多圈角(YawTotalAngle), 而 yaw 目标是 ±180 域的偏差,
+         * 两者会相差 360° 的整数倍 -> 必须折到"离当前位置最近"的等价目标,
+         * 否则会要求云台白转一整圈(实测出现过 358° 的误差) */
+        {
+            float tgt = gimbal_cmd_recv.yaw + yaw_mech_off;
+            float cur = gimba_IMU_data->YawTotalAngle;
+            float d   = tgt - cur;
 
+            while (d >  180.0f) d -= 360.0f;
+            while (d < -180.0f) d += 360.0f;
+
+            DJIMotorSetRef(yaw_motor, cur + d);   /* 与 cur 同域, PID 误差 = d ∈ (-180,180] */
+        }
+
+        
         /* 双保险: 即使上层 pitch 累积失控, 也把目标钳在机械行程内*/
         {
             const float LIM_UP   = PITCH_MAX_ANGLE * DEGREE_2_RAD;
