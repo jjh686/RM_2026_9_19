@@ -101,6 +101,18 @@ static void FS2RC_Adapt(void)
         spin_dir = (spin_dir > 0) ? -1 : 1;
     }
 
+    /* SB(CH7) 中档 → 下档: 把当前实际角度回填成目标, 让云台原地接管, 不跳回中位 */
+    if (switch_is_mid(rc_compat[LAST].rc.switch_left) &&
+        switch_is_down(rc_compat[TEMP].rc.switch_left))
+    {
+        float cur_yaw = (float)gimbal_fetch_data.yaw_motor_single_round_angle - YAW_ALIGN_ANGLE;
+
+        if (cur_yaw >  180.0f) cur_yaw -= 360.0f;
+        if (cur_yaw < -180.0f) cur_yaw += 360.0f;
+
+        gimbal_cmd_send.yaw = cur_yaw;
+    }
+
     /* CH6(SA 两档): 上档 = 停射, 下档 = 开火
      * 阈值 400 按实测调整 */
     shoot_enable = (fs_rc_data[TEMP].rc.knob_r > 400) ? 1u : 0u;
@@ -247,6 +259,8 @@ static void RemoteControlSet()
         chassis_cmd_send.chassis_mode = CHASSIS_ZERO_FORCE;
         chassis_cmd_send.wz = 0.0f;
         gimbal_cmd_send.gimbal_mode = GIMBAL_ZERO_FORCE;
+        gimbal_cmd_send.pitch = 0.0f;      /* 急停清空累积目标 */
+        gimbal_cmd_send.yaw   = 0.0f;
     }
 
     /* 1. 云台控制 */
@@ -266,8 +280,14 @@ static void RemoteControlSet()
     else if (robot_state == ROBOT_READY)
     {
         // 左开关[下]或视觉无目标: 遥控器摇杆控制云台
-        gimbal_cmd_send.yaw   += 0.005f * (float)rc_compat[TEMP].rc.rocker_l_;
-        gimbal_cmd_send.pitch += 0.001f * (float)rc_compat[TEMP].rc.rocker_l1;
+        gimbal_cmd_send.yaw   -= 0.0007f * (float)rc_compat[TEMP].rc.rocker_l_;
+        gimbal_cmd_send.pitch += 0.0003f * (float)rc_compat[TEMP].rc.rocker_l1;
+
+        /* 云台软限位: 防止累积目标超出机械行程 */
+        if (gimbal_cmd_send.pitch > PITCH_MAX_ANGLE) gimbal_cmd_send.pitch = PITCH_MAX_ANGLE;
+        if (gimbal_cmd_send.pitch < PITCH_MIN_ANGLE) gimbal_cmd_send.pitch = PITCH_MIN_ANGLE;
+        if (gimbal_cmd_send.yaw   > YAW_MAX_ANGLE)   gimbal_cmd_send.yaw   = YAW_MAX_ANGLE;
+        if (gimbal_cmd_send.yaw   < YAW_MIN_ANGLE)   gimbal_cmd_send.yaw   = YAW_MIN_ANGLE;
     }
 
     /* 2. 底盘速度控制: 左开关[中]由上位机导航控制, 左开关[下]由遥控器摇杆控制 */
@@ -354,6 +374,8 @@ static void SentryAutoSet(void)
         chassis_cmd_send.chassis_mode = CHASSIS_ZERO_FORCE;
         chassis_cmd_send.wz = 0.0f;
         gimbal_cmd_send.gimbal_mode = GIMBAL_ZERO_FORCE;
+        gimbal_cmd_send.pitch = 0.0f;      /* 急停清空累积目标 */
+        gimbal_cmd_send.yaw   = 0.0f;
         return;
     }
 
@@ -508,6 +530,8 @@ static void EmergencyHandler(void)
         chassis_cmd_send.chassis_mode = CHASSIS_ZERO_FORCE;
 
         gimbal_cmd_send.gimbal_mode = GIMBAL_ZERO_FORCE;
+        gimbal_cmd_send.pitch = 0.0f;      /* 急停清空累积目标 */
+        gimbal_cmd_send.yaw   = 0.0f;
 
         shoot_cmd_send.shoot_mode = SHOOT_OFF;
         shoot_cmd_send.friction_mode = FRICTION_OFF;
