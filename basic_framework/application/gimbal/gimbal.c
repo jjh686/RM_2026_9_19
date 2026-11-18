@@ -99,7 +99,8 @@ void GimbalInit()
                 .Kp = 0.69f,
                 .Ki = 0.05f,            // 先给很小, 排除积分反冲
                 .Kd = 0.0f,
-                .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
+                /* gimbal.c speed_PID.Improve 补上位 */
+                .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit| PID_Derivative_On_Measurement | PID_OutputFilter,
                 .IntegralLimit = 0.25f,  // 积分最多贡献 0.25N·m
                 .MaxOut = 4.4f,       
                 .Output_LPF_RC = 0.02f,   /* 新增: 输出低通, 抑制振荡 */
@@ -133,20 +134,21 @@ void GimbalInit()
 }
 
 /**
- * @brief 就近限位: 把目标角度折到当前 pitch 反馈的 ±180 范围内
- *        atan2 型反馈(Pitch)在 ±180 处跳变, 直接当目标会让电机绕整圈
- * @param target robot_cmd 给出的目标角度(可能累积到 ±360 以上)
- * @return 与当前角度距离不超过 180° 的等价目标
+ * @brief 就近限位: 把目标角度折到当前 pitch 反馈的 ±π 范围内
+ *        Pitch 在 ±180° 处跳变, 直接当目标会让电机绕整圈
+ * @param target robot_cmd 给出的目标角度(弧度, 可能累积到 ±2π 以上)
+ * @return 与当前姿态距离不超过 π 的等价目标(弧度)
+ * @note  入参/出参均为弧度, 与主控制链(pitch_cmd_ramp / pitch_imu_rad)统一
  */
 static float pitch_ref_near(float target)
 {
-    float cur = -gimba_IMU_data->Pitch;   /* 当前反馈, ±180 */
+    float cur = pitch_imu_rad;              /* 当前反馈(弧度), 与 PID 同源 */
     float err = target - cur;
 
-    while (err >  180.0f) err -= 360.0f;
-    while (err < -180.0f) err += 360.0f;
+    while (err >  PI) err -= 2.0f * PI;
+    while (err < -PI) err += 2.0f * PI;
 
-    return cur + err;                    /* PID 的误差 = err, 恒在 ±180 内 */
+    return cur + err;                       /* PID 的误差 = err, 恒在 ±π 内 */
 }
 
 /* 机器人云台控制核心任务,后续考虑只保留IMU控制,不再需要电机的反馈 */
@@ -246,7 +248,8 @@ void GimbalTask()
             const float LIM_UP   = PITCH_MAX_ANGLE * DEGREE_2_RAD;
             const float LIM_DOWN = PITCH_MIN_ANGLE * DEGREE_2_RAD;
 
-            float tgt = gimbal_cmd_recv.pitch * DEGREE_2_RAD + pitch_zero_off;
+            /* 先把目标折到当前姿态的 ±π 内(弧度), 再按机械行程钳位 */
+            float tgt = pitch_ref_near(gimbal_cmd_recv.pitch * DEGREE_2_RAD + pitch_zero_off);
 
             if (tgt > pitch_zero_off + LIM_UP)   tgt = pitch_zero_off + LIM_UP;
             if (tgt < pitch_zero_off + LIM_DOWN) tgt = pitch_zero_off + LIM_DOWN;
