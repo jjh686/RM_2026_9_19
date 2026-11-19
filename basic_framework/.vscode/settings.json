@@ -41,8 +41,8 @@
     "emberprobe.objdumpPath": "C:\\Program Files (x86)\\Arm GNU Toolchain arm-none-eabi\\14.2 rel1\\bin\\arm-none-eabi-objdump.exe",
     "emberprobe.rtos": "FreeRTOS",
     "emberprobe.transport": "swd",
-    "emberprobe.sampleFrequencyHz": 30,
-    "emberprobe.maxSamples": 2000
-
+    "emberprobe.sampleFrequencyHz": 100,
+    "emberprobe.maxSamples": 6000,
+    "emberprobe.adapterSpeedKhz": 24000
 }
 
