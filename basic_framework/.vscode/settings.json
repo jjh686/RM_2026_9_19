@@ -40,9 +40,9 @@
     "emberprobe.armToolchainPath": "D:\\BaiduNetdiskDownload\\RM\\archive\\EC\\VSCode+Ozone环境配置\\gcc-arm-none-eabi-10.3-2021.10-win32\\Arm-GNU-Toolchian\\bin",
     "emberprobe.rtos": "FreeRTOS",
     "emberprobe.transport": "swd",
-    "emberprobe.sampleFrequencyHz": 50,
-    "emberprobe.maxSamples": 2000,
-    "emberprobe.adapterSpeedKhz": 2000
+    "emberprobe.sampleFrequencyHz": 100,
+    "emberprobe.maxSamples": 6000,
+    "emberprobe.adapterSpeedKhz": 24000
 
 }
 
