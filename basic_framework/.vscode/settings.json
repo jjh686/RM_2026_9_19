@@ -43,6 +43,6 @@
     "emberprobe.transport": "swd",
     "emberprobe.sampleFrequencyHz": 100,
     "emberprobe.maxSamples": 6000,
-    "emberprobe.adapterSpeedKhz": 24000
+    "emberprobe.adapterSpeedKhz": 4000
 }
 
