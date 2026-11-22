@@ -74,16 +74,16 @@ void ShootInit()
         },
         .controller_param_init_config = {
             .speed_PID = {
-                .Kp = 0, // 20
-                .Ki = 0, // 1
+                .Kp = 20.0f, // 20
+                .Ki = 1.0f, // 1
                 .Kd = 0,
                 .Improve = PID_Integral_Limit,
                 .IntegralLimit = 10000,
                 .MaxOut = 15000,
             },
             .current_PID = {
-                .Kp = 0, // 0.7
-                .Ki = 0, // 0.1
+                .Kp = 0.7f, // 0.7
+                .Ki = 0.1f, // 0.1
                 .Kd = 0,
                 .Improve = PID_Integral_Limit,
                 .IntegralLimit = 10000,
@@ -364,8 +364,8 @@ void ShootTask()
             DJIMotorSetRef(friction_r, 0);
             break;
         case SMALL_AMU_18:
-            DJIMotorSetRef(friction_l, 0);
-            DJIMotorSetRef(friction_r, 0);
+            DJIMotorSetRef(friction_l, 24000);
+            DJIMotorSetRef(friction_r, 24000);
             break;
         case SMALL_AMU_30:
             DJIMotorSetRef(friction_l, 0);
