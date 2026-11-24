@@ -14,6 +14,7 @@ void MotorControlTask()
     // if(cnt%5==0) //200hz
     // if(cnt%10==0) //100hz
     GimbalUpdateYawGyroDeg();   /* 1kHz 刷新 yaw 陀螺(度/秒), 速度内环用 */
+    GimbalUpdatePitchFeedback(); /* 1kHz 刷新 pitch 角度与陀螺(rad, rad/s), 速度内环用 */
     DJIMotorControl();
     PowerControl();
     /* 如果有对应的电机则取消注释,可以加入条件编译或者register对应的idx判断是否注册了电机 */

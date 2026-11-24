@@ -8,7 +8,7 @@
 //以下宏定义在第一次使用DM框架时请务必根据实际情况更改
 
 #define DM_MOTOR_CNT 6 //达妙电机注册数量最大值
-#define DM_TASK_CYCLE 2 //达妙任务运行周期，决定控制频率，PID计算频率以及电机反馈频率，必须为整数，单位为ms，推荐值为2
+#define DM_TASK_CYCLE 1 //达妙任务运行周期，1ms(1kHz) 与 05_云台 保持一致
 
 //以下为位置，速度，力矩的映射范围，电机第一次使用时一定要配合实际情况以及DM调试助手修改
 #define DM_P_MIN (-3.14159f)
@@ -65,6 +65,9 @@ typedef enum
     MIT_MODE
 } Motor_Control_Type_e;//DM电机封装的两个模式
 
+typedef float (*DMMotorSpeedUpdateFn)(void *context, PIDInstance *pid, float measure, float ref);
+typedef void (*DMMotorSpeedResetFn)(void *context, PIDInstance *pid);
+
 typedef struct
 {
     DM_Motor_Measure_s measure;
@@ -95,6 +98,9 @@ typedef struct
     Motor_Working_Type_e stop_flag;//软件关闭电机标志位
     CANInstance *motor_can_instance;//电机对应的CAN通信实例
     Motor_Control_Type_e working_type;//工作模式
+    DMMotorSpeedUpdateFn speed_update;//可选自定义速度环更新回调(返回最终力矩Nm)
+    DMMotorSpeedResetFn speed_reset;//可选自定义速度环复位回调(STOP时调用)
+    void *speed_context;
 } DMMotorInstance;//DM电机实例
 
 typedef enum
@@ -118,6 +124,12 @@ DMMotorInstance *DMMotorInit(DMMotor_Init_Config_s *config);
  * @param ref 设置的参考值
  */
 void DMMotorSetRef(DMMotorInstance *motor, float ref);
+
+/**
+ * @brief 为DM普通模式绑定自定义速度环/前馈回调(NULL表示回退默认PIDCalculate)
+ */
+void DMMotorBindSpeedController(DMMotorInstance *motor, DMMotorSpeedUpdateFn update,
+                                DMMotorSpeedResetFn reset, void *context);
 
 /**
  * @brief DM普通模式下设置最外环的闭环类型

@@ -35,7 +35,14 @@ static Chassis_Upload_Data_s chassis_fetch_data; // 从底盘应用接收的反�
 static FS_RC_ctrl_t *fs_rc_data;        // SBUS 原始数据,初始化时返回
 static RC_ctrl_t rc_compat[2];          // 适配成 DBUS 语义的数据[TEMP/LAST]
 static int8_t spin_dir = 1;             // +1 逆时针 / -1 顺时针, SC 中→下 切换一次翻转一次
-static uint8_t shoot_enable = 0;        // CH6(SA): 1=下档开火, 0=上档停射
+
+/* CH6(RD 旋钮) 射频上限: 满旋钮时的发射速率(发/秒)
+ * ⚠️ 不要回到 15: 拨盘 speed_PID.MaxOut=5000(≈5A) 吃不下 15*360*36/8=24300 aps,
+ *    会一顿一顿并触发卡弹保护(loader_jam_count 一直在涨) */
+#define SHOOT_RATE_MAX   12.0f
+
+static float   fire_ratio  = 0.0f;      // CH6(RD) 旋钮位置: 0(最左, 停拨) ~ 1(最右)
+static uint8_t shoot_enable = 0;        // 1 = 有油门(允许发射), 0 = 停射
 
 static Vision_Recv_s *vision_recv_data; // 视觉接收数据指针,初始化时返回
 // static Vision_Send_s vision_send_data;  // 视觉发送数据
@@ -117,11 +124,29 @@ static void FS2RC_Adapt(void)
         if (cur_yaw < -180.0f) cur_yaw += 360.0f;
 
         gimbal_cmd_send.yaw = cur_yaw;
+        {
+            float cur_pitch = -gimbal_fetch_data.gimbal_imu_data.Pitch;
+            if (cur_pitch > PITCH_MAX_ANGLE) cur_pitch = PITCH_MAX_ANGLE;
+            if (cur_pitch < PITCH_MIN_ANGLE) cur_pitch = PITCH_MIN_ANGLE;
+            gimbal_cmd_send.pitch = cur_pitch;
+        }
     }
 
-    /* CH6(SA 两档): 上档 = 停射, 下档 = 开火
-     * 阈值 400 按实测调整 */
-    shoot_enable = (fs_rc_data[TEMP].rc.knob_r > 400) ? 1u : 0u;
+    /* CH6(RD 旋钮) 当"射频油门": 实测最左 +670、最右 -671, 往右转数值减小
+     * fire_ratio: 0(最左, 停拨) ~ 1(最右, SHOOT_RATE_MAX 发/秒) */
+    {
+        float kr = (float)fs_rc_data[TEMP].rc.knob_r;
+
+        if (kr >  670.0f) kr =  670.0f;
+        if (kr < -671.0f) kr = -671.0f;
+
+        fire_ratio = (670.0f - kr) / 1341.0f;      /* 往前(右)转 -> 变大 */
+
+        if (fire_ratio < 0.05f)                    /* 最左 5% 死区, 防止误出弹 */
+            fire_ratio = 0.0f;
+
+        shoot_enable = (fire_ratio > 0.0f) ? 1u : 0u;
+    }
 
     /* 摇杆死区, 防止中立点漂移导致底盘缓慢爬行 */
     if (abs(rc_compat[TEMP].rc.rocker_l_) < 40) rc_compat[TEMP].rc.rocker_l_ = 0;
@@ -220,6 +245,17 @@ static void YawSetCurrent(void)
 }
 
 /**
+ * @brief pitch 原地接管: 把目标设成当前 IMU 俯仰角(抬头为正, 单位: 度), 急停/切档解除后原地定住不跳回 0°
+ */
+static void PitchSetCurrent(void)
+{
+    float cur_pitch = -gimbal_fetch_data.gimbal_imu_data.Pitch;
+    if (cur_pitch > PITCH_MAX_ANGLE) cur_pitch = PITCH_MAX_ANGLE;
+    if (cur_pitch < PITCH_MIN_ANGLE) cur_pitch = PITCH_MIN_ANGLE;
+    gimbal_cmd_send.pitch = cur_pitch;
+}
+
+/**
  * @brief 根据gimbal app传回的当前电机角度计算和零位的误差
  *        单圈绝对角度的范围是0~360,说明文档中有图示
  *
@@ -281,6 +317,32 @@ static void UpdateScUpConfirmed(void)
     sc_up_confirmed = (cnt >= 2) ? 1u : 0u;
 }
 
+/**
+ * @brief RD 旋钮比例(0~1) → 摩擦轮转速档(承载在 bullet_speed 枚举上)
+ * @note  档位→转速的映射在 shoot.c 的 switch 里:
+ *          BULLET_SPEED_NONE → 4000(待机) / 15 → 8000 / 18 → 16000 / 30 → 24000
+ *        升档阈值 0.05/0.40/0.75, 降档阈值 0.03/0.36/0.70(留 4% 滞回),
+ *        防止旋钮停在边界时档位来回跳、导致弹速反复突变。
+ */
+static Bullet_Speed_e FrictionLevelFromRatio(float r)
+{
+    /* 档位: 0=待机(4000) 1=低速(8000) 2=中速(16000) 3=高速(24000) */
+    static const Bullet_Speed_e map[4] = {
+        BULLET_SPEED_NONE, SMALL_AMU_15, SMALL_AMU_18, SMALL_AMU_30};
+
+    static const float up[3]   = {0.05f, 0.40f, 0.75f};   /* 升档阈值 */
+    static const float down[3] = {0.03f, 0.36f, 0.70f};   /* 降档阈值(滞回) */
+
+    static uint8_t lv = 0;
+
+    if (lv < 3 && r >= up[lv])
+        lv++;                       /* 升一档 */
+    else if (lv > 0 && r < down[lv - 1])
+        lv--;                       /* 降一档 */
+
+    return map[lv];
+}
+
 static void RemoteControlSet()
 {
     // 控制底盘和云台运行模式,云台待添加,云台是否始终使用IMU数据?
@@ -302,7 +364,7 @@ static void RemoteControlSet()
         chassis_cmd_send.chassis_mode = CHASSIS_ZERO_FORCE;
         chassis_cmd_send.wz = 0.0f;
         gimbal_cmd_send.gimbal_mode = GIMBAL_ZERO_FORCE;
-        gimbal_cmd_send.pitch = 0.0f;      /* 急停清空累积目标 */
+        PitchSetCurrent();                 /* pitch: 原地接管, 切回中档时不动 */
         YawSetCurrent();                   /* yaw: 原地接管, 不转回中位 */
     }
 
@@ -370,22 +432,26 @@ static void RemoteControlSet()
     else
         ; // 弹舱舵机控制,待添加servo_motor模块,关闭
 
-    /* CH6(SA): 上档=安全停射, 下档=摩擦轮开+连发
-     * 条件里带 robot_state == ROBOT_READY, 急停时即使 SA 在下档也不出弹 */
-    if (shoot_enable && robot_state == ROBOT_READY)
-    {
-        shoot_cmd_send.shoot_mode    = SHOOT_ON;
+    /* 摩擦轮: 跟随 RD 油门 —— 最左(fire_ratio=0)停转, 往右旋过死区才开启
+     * 另外仍需 robot_state == READY 且非 SC 上档(急停) */
+    if (robot_state == ROBOT_READY && !sc_up_confirmed && fire_ratio > 0.0f)
         shoot_cmd_send.friction_mode = FRICTION_ON;
-        shoot_cmd_send.load_mode     = LOAD_BURSTFIRE;
-        shoot_cmd_send.bullet_speed  = SMALL_AMU_18;   /* ← 原方案写的 SMALL_AMU_23 不存在 */
-        shoot_cmd_send.shoot_rate = 15.0f * speed_scale;    
+    else
+        shoot_cmd_send.friction_mode = FRICTION_OFF;
+
+    /* 拨盘: RD 旋钮当油门 —— 最左停, 往右转射频逐渐加快 */
+    shoot_cmd_send.shoot_mode    = SHOOT_ON;       /* 不用 SHOOT_OFF, 避免电机使能全撤 */
+    shoot_cmd_send.bullet_speed  = FrictionLevelFromRatio(fire_ratio);   /* 随 RD 旋钮分档 */
+
+    if (robot_state == ROBOT_READY && fire_ratio > 0.0f)
+    {
+        shoot_cmd_send.load_mode  = LOAD_BURSTFIRE;
+        shoot_cmd_send.shoot_rate = SHOOT_RATE_MAX * fire_ratio;
     }
     else
     {
-        shoot_cmd_send.shoot_mode    = SHOOT_ON;       /* 不用 SHOOT_OFF, 避免电机使能全撤 */
-        shoot_cmd_send.friction_mode = FRICTION_OFF;
-        shoot_cmd_send.load_mode     = LOAD_STOP;
-        shoot_cmd_send.shoot_rate    = 0.0f;
+        shoot_cmd_send.load_mode  = LOAD_STOP;
+        shoot_cmd_send.shoot_rate = 0.0f;
     }
 
 }
@@ -417,7 +483,7 @@ static void SentryAutoSet(void)
         chassis_cmd_send.chassis_mode = CHASSIS_ZERO_FORCE;
         chassis_cmd_send.wz = 0.0f;
         gimbal_cmd_send.gimbal_mode = GIMBAL_ZERO_FORCE;
-        gimbal_cmd_send.pitch = 0.0f;      /* 急停清空累积目标 */
+        PitchSetCurrent();                 /* pitch: 原地接管, 切回中档时不动 */
         YawSetCurrent();                   /* yaw: 原地接管, 不转回中位 */
         return;
     }
@@ -604,7 +670,7 @@ static void EmergencyHandler(void)
         chassis_cmd_send.chassis_mode = CHASSIS_ZERO_FORCE;
 
         gimbal_cmd_send.gimbal_mode = GIMBAL_ZERO_FORCE;
-        gimbal_cmd_send.pitch = 0.0f;      /* 急停清空累积目标 */
+        PitchSetCurrent();                 /* pitch: 原地接管, 切回中档时不动 */
         YawSetCurrent();                   /* yaw: 原地接管, 不转回中位 */
 
         shoot_cmd_send.shoot_mode = SHOOT_OFF;

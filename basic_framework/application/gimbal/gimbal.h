@@ -19,4 +19,9 @@ void GimbalTask();
  */
 void GimbalUpdateYawGyroDeg(void);
 
+/**
+ * @brief 1kHz 刷新 pitch 角度(rad)与陀螺角速度(rad/s), 避免 200Hz 阶梯反馈进入 1kHz 速度环
+ */
+void GimbalUpdatePitchFeedback(void);
+
 #endif // GIMBAL_H

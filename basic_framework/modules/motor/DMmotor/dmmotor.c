@@ -116,6 +116,9 @@ DMMotorInstance *DMMotorInit(DMMotor_Init_Config_s *config)
     motor->other_speed_feedback_ptr = config->controller_param_init_config.other_speed_feedback_ptr;
     motor->speed_feedforward_ptr = config->controller_param_init_config.speed_feedforward_ptr;
     motor->force_feedforward_ptr = config->controller_param_init_config.force_feedforward_ptr;
+    motor->speed_update = NULL;
+    motor->speed_reset = NULL;
+    motor->speed_context = NULL;
 
     //为电机实例注册CAN总线
     config->can_init_config.can_module_callback = DMMotorDecode;
@@ -128,7 +131,7 @@ DMMotorInstance *DMMotorInit(DMMotor_Init_Config_s *config)
     //开启并使能电机
     DMMotorEnable(motor);
     DMMotorSetMode(DM_CMD_MOTOR_MODE, motor);
-    
+
     return motor;
 }
 
@@ -165,7 +168,7 @@ DMMotorInstance *MITMotorInit(MIT_Init_Config_s *config)
     //开启并使能电机
     DMMotorEnable(motor);
     DMMotorSetMode(DM_CMD_MOTOR_MODE, motor);
-    
+
     return motor;
 }
 
@@ -177,7 +180,7 @@ void DMMotorEnable(DMMotorInstance *motor)
 }
 
 //关闭电机，使电机的输出为0，清空PID（注意不是失能）
-void DMMotorStop(DMMotorInstance *motor) 
+void DMMotorStop(DMMotorInstance *motor)
 {
     motor->stop_flag = MOTOR_STOP;
 }
@@ -209,6 +212,15 @@ void DMMotorChangeFeed(DMMotorInstance *motor, Closeloop_Type_e loop, Feedback_S
 void DMMotorSetRef(DMMotorInstance *motor, float ref)
 {
     motor->pid_ref = ref;
+}
+
+void DMMotorBindSpeedController(DMMotorInstance *motor, DMMotorSpeedUpdateFn update,
+                                DMMotorSpeedResetFn reset, void *context)
+{
+    if (!motor) return;
+    motor->speed_update  = update;
+    motor->speed_reset   = update ? reset : NULL;
+    motor->speed_context = update ? context : NULL;
 }
 
 /// @brief MIT模式下设置各种参数
@@ -293,41 +305,57 @@ void DMMotorTask()
         }
         else if (motor->working_type == NORMAL_MODE)//普通模式需要发送的控制帧
         {
-            float pid_ref, pid_measure, set;
+            float set = 0.0f;
 
-            pid_ref = motor->pid_ref;
-
-            if (motor_setting->motor_reverse_flag == MOTOR_DIRECTION_REVERSE)//如果设置反向，直接将参考值反转符号
-                pid_ref *= -1;
-
-            if ((motor_setting->close_loop_type & ANGLE_LOOP) && motor_setting->outer_loop_type == ANGLE_LOOP)//如果启用了角度环且最外层闭环为角度环，则计算角度环
+            if (motor->stop_flag == MOTOR_STOP)
             {
-                if (motor_setting->angle_feedback_source == OTHER_FEED)//判断是否使用电机反馈
-                    pid_measure = *motor->other_angle_feedback_ptr;
-                else
-                    pid_measure = measure->total_position;
-                
-                pid_ref = PIDCalculate(&motor->angle_PID, pid_measure, pid_ref); //对总角度进行闭环，而不是单圈角度
+                //如果电机被关闭，直接清零PID及自定义速度环/前馈状态，输出0力矩
+                PIDClear(&motor->angle_PID);
+                PIDClear(&motor->speed_PID);
+                if (motor->speed_reset != NULL)
+                    motor->speed_reset(motor->speed_context, &motor->speed_PID);
+                set = 0.0f;
             }
-
-            if ((motor_setting->close_loop_type & SPEED_LOOP) && (motor_setting->outer_loop_type & (ANGLE_LOOP | SPEED_LOOP)))//如果启用了速度环且最外层闭环为角度环或速度环，则计算速度环
+            else
             {
-                if (motor_setting->feedforward_flag & SPEED_FEEDFORWARD)
-                    pid_ref += *motor->speed_feedforward_ptr; //速度前馈
+                float pid_ref, pid_measure;
 
-                if (motor_setting->speed_feedback_source == OTHER_FEED)//判断是否使用电机反馈
-                    pid_measure = *motor->other_speed_feedback_ptr;
-                else
-                    pid_measure = measure->velocity;
-                
-                pid_ref = PIDCalculate(&motor->speed_PID, pid_measure, pid_ref);//对速度环闭环
+                pid_ref = motor->pid_ref;
+
+                if (motor_setting->motor_reverse_flag == MOTOR_DIRECTION_REVERSE)//如果设置反向，直接将参考值反转符号
+                    pid_ref *= -1;
+
+                if ((motor_setting->close_loop_type & ANGLE_LOOP) && motor_setting->outer_loop_type == ANGLE_LOOP)//如果启用了角度环且最外层闭环为角度环，则计算角度环
+                {
+                    if (motor_setting->angle_feedback_source == OTHER_FEED)//判断是否使用电机反馈
+                        pid_measure = *motor->other_angle_feedback_ptr;
+                    else
+                        pid_measure = measure->total_position;
+
+                    pid_ref = PIDCalculate(&motor->angle_PID, pid_measure, pid_ref); //对总角度进行闭环，而不是单圈角度
+                }
+
+                if ((motor_setting->close_loop_type & SPEED_LOOP) && (motor_setting->outer_loop_type & (ANGLE_LOOP | SPEED_LOOP)))//如果启用了速度环且最外层闭环为角度环或速度环，则计算速度环
+                {
+                    if (motor_setting->feedforward_flag & SPEED_FEEDFORWARD)
+                        pid_ref += *motor->speed_feedforward_ptr; //速度前馈
+
+                    if (motor_setting->speed_feedback_source == OTHER_FEED)//判断是否使用电机反馈
+                        pid_measure = *motor->other_speed_feedback_ptr;
+                    else
+                        pid_measure = measure->velocity;
+
+                    if (motor->speed_update != NULL)
+                        pid_ref = motor->speed_update(motor->speed_context, &motor->speed_PID, pid_measure, pid_ref);
+                    else
+                        pid_ref = PIDCalculate(&motor->speed_PID, pid_measure, pid_ref);//对速度环闭环
+                }
+
+                if (motor_setting->feedforward_flag & FORCE_FEEDFORWARD)
+                    pid_ref += *motor->force_feedforward_ptr;//力矩前馈
+
+                set = pid_ref;//得到最终的控制值
             }
-
-            
-            if (motor_setting->feedforward_flag & FORCE_FEEDFORWARD)
-                pid_ref += *motor->force_feedforward_ptr;//力矩前馈
-
-            set = pid_ref;//得到最终的控制值
 
             LIMIT_MIN_MAX(set, DM_T_MIN, DM_T_MAX);//进行限幅防止溢出
 
@@ -337,13 +365,6 @@ void DMMotorTask()
             motor_send_mailbox.torque_des   = float_to_uint(set, DM_T_MIN, DM_T_MAX, 12);
             motor_send_mailbox.Kp           = float_to_uint(0, KP_MIN, KP_MAX, 12);
             motor_send_mailbox.Kd           = float_to_uint(0, KD_MIN, KD_MAX, 12);
-
-            //如果电机被关闭，则清空其PID以及力矩输出
-            if (motor->stop_flag == MOTOR_STOP){
-                motor_send_mailbox.torque_des = float_to_uint(0, DM_T_MIN, DM_T_MAX, 12);
-                PIDClear(&motor->angle_PID);
-                PIDClear(&motor->speed_PID);
-            }
 
             //将参数按通信协议中的格式填入到tx_buff中
             motor->motor_can_instance->tx_buff[0] = (uint8_t)(motor_send_mailbox.position_des >> 8);
