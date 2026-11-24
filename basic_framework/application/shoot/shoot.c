@@ -135,7 +135,7 @@ void ShootInit()
                 .Kd = 0,
                 .Improve = PID_Integral_Limit,
                 .IntegralLimit = 5000,
-                .MaxOut = 5000,
+                .MaxOut = 7000, // 7A (C610 满量程 ±10000 = ±10A)
             },
 
         },
