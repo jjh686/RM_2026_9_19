@@ -43,6 +43,10 @@
     "emberprobe.transport": "swd",
     "emberprobe.sampleFrequencyHz": 100,
     "emberprobe.maxSamples": 6000,
-    "emberprobe.adapterSpeedKhz": 2000
+    "emberprobe.adapterSpeedKhz": 2000,
+    "memory-view.trackDebuggers": [
+        "ozone"
+    ],
+    "orbit.defaultProgram": "d:\\STM32project\\RM\\changing\\basic_framework-master\\basic_framework-master\\basic_framework\\build\\basic_framework.elf"
 }
 
