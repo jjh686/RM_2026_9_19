@@ -74,20 +74,20 @@ void ShootInit()
         },
         .controller_param_init_config = {
             .speed_PID = {
-                .Kp = 20.0f, // 20
-                .Ki = 1.0f, // 1
+                .Kp = 5.0f,
+                .Ki = 0.3f,
                 .Kd = 0,
                 .Improve = PID_Integral_Limit,
-                .IntegralLimit = 10000,
-                .MaxOut = 15000,
+                .IntegralLimit = 4000,
+                .MaxOut = 10000,
             },
             .current_PID = {
                 .Kp = 0.7f, // 0.7
                 .Ki = 0.1f, // 0.1
                 .Kd = 0,
                 .Improve = PID_Integral_Limit,
-                .IntegralLimit = 10000,
-                .MaxOut = 15000,
+                .IntegralLimit = 5000,
+                .MaxOut = 10000,
             },
         },
         .controller_setting_init_config = {
@@ -294,12 +294,16 @@ void ShootTask()
     return;
 #endif
 
+    static float fric_ref_ramp = 0.0f;
+    const float  FRIC_RAMP_STEP = 100.0f; /* 5ms 每周期步进 100 aps (= 20000 aps/s, 10000档 0.5s 起满) */
+
     // 对shoot mode等于SHOOT_STOP的情况特殊处理,直接停止所有电机(紧急停止)
     if (shoot_cmd_recv.shoot_mode == SHOOT_OFF)
     {
         DJIMotorStop(friction_l);
         DJIMotorStop(friction_r);
         DJIMotorStop(loader);
+        fric_ref_ramp = 0.0f;
     }
     else // 恢复运行
     {
@@ -314,34 +318,44 @@ void ShootTask()
     //     return;
 
     // 确定是否开启摩擦轮,后续可能修改为键鼠模式下始终开启摩擦轮(上场时建议一直开启)
-    if (shoot_cmd_recv.friction_mode == FRICTION_ON)
+    float fric_target = 0.0f;
+    if (shoot_cmd_recv.shoot_mode != SHOOT_OFF &&
+        shoot_cmd_recv.friction_mode == FRICTION_ON)
     {
         // 根据收到的弹速设置设定摩擦轮电机参考值,需实测后填入
         switch (shoot_cmd_recv.bullet_speed)
         {
         case SMALL_AMU_15:
-            DJIMotorSetRef(friction_l, 3000);
-            DJIMotorSetRef(friction_r, 3000);
+            fric_target = 3000.0f;
             break;
         case SMALL_AMU_18:
-            DJIMotorSetRef(friction_l, 6000);
-            DJIMotorSetRef(friction_r, 6000);
+            fric_target = 6000.0f;
             break;
         case SMALL_AMU_30:
-            DJIMotorSetRef(friction_l, 10000);
-            DJIMotorSetRef(friction_r, 10000);
+            fric_target = 10000.0f;
             break;
         default: // 当前为了调试设定的默认值4000,因为还没有加入裁判系统无法读取弹速.
-            DJIMotorSetRef(friction_l, 2000);
-            DJIMotorSetRef(friction_r, 2000);
+            fric_target = 2000.0f;
             break;
         }
     }
-    else // 关闭摩擦轮
+
+    // 软启动/减速斜坡逼近目标转速
+    if (fric_ref_ramp < fric_target)
     {
-        DJIMotorSetRef(friction_l, 0);
-        DJIMotorSetRef(friction_r, 0);
+        fric_ref_ramp += FRIC_RAMP_STEP;
+        if (fric_ref_ramp > fric_target)
+            fric_ref_ramp = fric_target;
     }
+    else if (fric_ref_ramp > fric_target)
+    {
+        fric_ref_ramp -= FRIC_RAMP_STEP;
+        if (fric_ref_ramp < fric_target)
+            fric_ref_ramp = fric_target;
+    }
+
+    DJIMotorSetRef(friction_l, fric_ref_ramp);
+    DJIMotorSetRef(friction_r, fric_ref_ramp);
 
     /* ===== 摩擦轮就绪门槛: 摩擦轮未到目标转速 70% 前, 拨盘先不拨 =====
      * 目的: 避免第一发初速不足/卡弹
@@ -357,7 +371,7 @@ void ShootTask()
 
     if (shoot_cmd_recv.friction_mode == FRICTION_ON)
     {
-        float tgt = (float)friction_l->motor_controller.speed_PID.Ref;
+        float tgt = fric_target;
 
         /* (1) 只在"刚由停变转"的第一帧开始一次等待; 之后换档不再中断拨盘 */
         if (!fric_was_on)
@@ -381,7 +395,7 @@ void ShootTask()
             {
                 fric_wait_ms += 5.0f;               /* RobotTask 周期 5ms */
 
-                if (fric_wait_ms > 1000.0f)         /* (2) 超时强制放行 */
+                if (fric_wait_ms > 1500.0f)         /* (2) 超时强制放行 */
                 {
                     fric_ready = 1;
                     LOGWARNING("[SHOOT] friction not ready %.0fms, force release",
