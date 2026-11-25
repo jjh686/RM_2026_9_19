@@ -50,9 +50,9 @@ volatile uint32_t dbg_gimbal_stop_frm = 0;
 #define PITCH_SPEED_KI              0.25f
 #define PITCH_SPEED_I_LIMIT         0.60f
 #define PITCH_TORQUE_LIMIT_NM       4.0f
-#define PITCH_SPEED_LIMIT_RAD_S     (45.0f  * DEGREE_2_RAD)
+#define PITCH_SPEED_LIMIT_RAD_S     (75.0f  * DEGREE_2_RAD)
 #define PITCH_ACCEL_RAD_S2          (720.0f * DEGREE_2_RAD)
-#define PITCH_BRAKE_RAD_S2          (120.0f * DEGREE_2_RAD)
+#define PITCH_BRAKE_RAD_S2          (180.0f * DEGREE_2_RAD)
 #define PITCH_GRAVITY_RAMP_NM_S     5.0f
 #define PITCH_SPEED_PI_MAX_DT_S     0.030f
 

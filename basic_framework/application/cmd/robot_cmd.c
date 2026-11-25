@@ -386,7 +386,7 @@ static void RemoteControlSet()
     {
         // 左开关[下]或视觉无目标: 遥控器摇杆控制云台
         gimbal_cmd_send.yaw   -= 0.0007f * (float)rc_compat[TEMP].rc.rocker_l_;   /* 0.005 = 660°/s 远超云台能力(300°/s), 会一直饱和->抖 */
-        gimbal_cmd_send.pitch += 0.0003f * (float)rc_compat[TEMP].rc.rocker_l1;
+        gimbal_cmd_send.pitch += 0.0005f * (float)rc_compat[TEMP].rc.rocker_l1;
 
         /* 云台软限位: 防止累积目标超出机械行程 */
         if (gimbal_cmd_send.pitch > PITCH_MAX_ANGLE) gimbal_cmd_send.pitch = PITCH_MAX_ANGLE;
