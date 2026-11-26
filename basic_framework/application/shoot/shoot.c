@@ -99,10 +99,10 @@ void ShootInit()
             .motor_reverse_flag = MOTOR_DIRECTION_NORMAL,
         },
         .motor_type = M3508};
-    friction_config.can_init_config.tx_id = 1,
+    friction_config.can_init_config.tx_id = 2,
     friction_l = DJIMotorInit(&friction_config);
 
-    friction_config.can_init_config.tx_id = 2; // 右摩擦轮,改txid和方向就行
+    friction_config.can_init_config.tx_id = 1; // 右摩擦轮,改txid和方向就行
     friction_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_REVERSE;
     friction_r = DJIMotorInit(&friction_config);
 
@@ -356,70 +356,6 @@ void ShootTask()
 
     DJIMotorSetRef(friction_l, fric_ref_ramp);
     DJIMotorSetRef(friction_r, fric_ref_ramp);
-
-    /* ===== 摩擦轮就绪门槛: 摩擦轮未到目标转速 70% 前, 拨盘先不拨 =====
-     * 目的: 避免第一发初速不足/卡弹
-     *  (1) 只在摩擦轮"由停变转"时判断一次, 换档(3000→6000→10000)不重新等待,
-     *      拨盘不中断;
-     *  (2) 1.5s 超时强制放行, 防止摩擦轮打滑/编码器异常导致拨盘永久不拨
-     *  (3) 取左右两轮较慢值, 单轮异常不会永久阻塞
-     *  (4) LOAD_REVERSE(手动退弹) 不受此门槛限制
-     */
-    static uint8_t fric_ready    = 0;
-    static uint8_t fric_was_on  = 0;        /* 上一帧摩擦轮是否已在转 */
-    static float   fric_wait_ms  = 0.0f;
-
-    if (shoot_cmd_recv.friction_mode == FRICTION_ON)
-    {
-        float tgt = fric_target;
-
-        /* (1) 只在"刚由停变转"的第一帧开始一次等待; 之后换档不再中断拨盘 */
-        if (!fric_was_on)
-        {
-            fric_ready   = 0;
-            fric_wait_ms = 0.0f;
-        }
-        fric_was_on = 1;
-
-        if (!fric_ready)
-        {
-            float v_l = fabsf(friction_l->measure.speed_aps);
-            float v_r = fabsf(friction_r->measure.speed_aps);
-            float v   = (v_l < v_r) ? v_l : v_r;    /* (3) 取较慢的那个 */
-
-            if (tgt != 0.0f && v > 0.7f * fabsf(tgt))
-            {
-                fric_ready = 1;
-            }
-            else
-            {
-                fric_wait_ms += 5.0f;               /* RobotTask 周期 5ms */
-
-                if (fric_wait_ms > 1500.0f)         /* (2) 超时强制放行 */
-                {
-                    fric_ready = 1;
-                    LOGWARNING("[SHOOT] friction not ready %.0fms, force release",
-                               fric_wait_ms);
-                }
-            }
-        }
-    }
-    else
-    {
-        fric_ready    = 0;
-        fric_was_on  = 0;                       /* 关摩擦轮时清掉, 下次开启重新判断 */
-        fric_wait_ms  = 0.0f;
-    }
-
-    /* (4) LOAD_REVERSE(手动退弹) 不受门槛限制 */
-    if (!fric_ready &&
-        shoot_cmd_recv.load_mode != LOAD_STOP &&
-        shoot_cmd_recv.load_mode != LOAD_REVERSE)
-    {
-        DJIMotorSetRef(loader, 0.0f);
-        PubPushMessage(shoot_pub, (void *)&shoot_feedback_data);
-        return;
-    }
 
     // 若不在休眠状态,根据robotCMD传来的控制模式进行拨盘电机参考值设定和模式切换
     switch (shoot_cmd_recv.load_mode)
