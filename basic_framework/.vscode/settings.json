@@ -41,12 +41,11 @@
     "emberprobe.objdumpPath": "C:\\Program Files (x86)\\Arm GNU Toolchain arm-none-eabi\\14.2 rel1\\bin\\arm-none-eabi-objdump.exe",
     "emberprobe.rtos": "FreeRTOS",
     "emberprobe.transport": "swd",
-    "emberprobe.sampleFrequencyHz": 100,
-    "emberprobe.maxSamples": 6000,
-    "emberprobe.adapterSpeedKhz": 2000,
     "memory-view.trackDebuggers": [
-        "ozone"
+        "ozone",
+        "orbit"
     ],
-    "orbit.defaultProgram": "d:\\STM32project\\RM\\changing\\basic_framework-master\\basic_framework-master\\basic_framework\\build\\basic_framework.elf"
+    "orbit.defaultProgram": "d:\\STM32project\\RM\\changing\\basic_framework-master\\basic_framework-master\\basic_framework\\build\\basic_framework.elf",
+    "emberprobe.sampleFrequencyHz": 100
 }
 

@@ -90,6 +90,18 @@ static void FS2RC_Adapt(void)
 {
     rc_compat[LAST] = rc_compat[TEMP];   /* 保留上一帧, 供开关/按键边沿判断 */
 
+    if (!RemoteControlIsOnline())
+    {
+        /* 丢帧/离线容忍窗口(200ms)内: 保留上一帧合法开关档位, 避免 FS_RCLostCallback 清零
+         * fs_rc_ctrl 后把 SC 误判成上档急停(直接破坏 off_cnt 容忍并导致云台掉电低头);
+         * 仅清零摇杆, 超过 200ms 容忍后由 EmergencyHandler 的 online_tol=0 统一急停 */
+        rc_compat[TEMP].rc.rocker_l_ = 0;
+        rc_compat[TEMP].rc.rocker_l1 = 0;
+        rc_compat[TEMP].rc.rocker_r_ = 0;
+        rc_compat[TEMP].rc.rocker_r1 = 0;
+        return;
+    }
+
     /* 摇杆跳变抑制: 单帧变化超过 800 视为误码, 沿用上一帧
      * 防止误码让 rocker_r1 瞬间归零 → vx=0 → vt 斜坡下降 → 速度骤降 */
     rc_compat[TEMP].rc.rocker_r_  = clamp_rocker_step(fs_rc_data[TEMP].rc.rocker_r_,  rc_compat[LAST].rc.rocker_r_);

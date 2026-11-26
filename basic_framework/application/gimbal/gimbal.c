@@ -286,6 +286,7 @@ void GimbalInit()
     };
 
     yaw_motor = DJIMotorInit(&yaw_config);
+    DJIMotorStop(yaw_motor); /* 上电默认卸力, 等待 GimbalTask 收到有效使能模式 */
     pitch_motor = DMMotorInit(&pitch_config);
 
     if (pitch_motor == NULL)

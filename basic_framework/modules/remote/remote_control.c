@@ -95,105 +95,131 @@ static void sbus_to_rc(const uint8_t *sbus_buf)
     memcpy(&rc_ctrl[LAST], &rc_ctrl[TEMP], sizeof(RC_ctrl_t)); // 保存上一次的数据,用于按键持续按下和切换的判断
 }
 
-/* SC(CH8) 异常值连续确认: 连续 N 帧都非法才按上档(急停)处理
- * 3 帧 × 14ms(SBUS 70Hz) ≈ 42ms, 既能挡单帧误码, 急停响应也不迟钝 */
-#define SC_BAD_FRAME_THRESHOLD      3u
+/* FS/SBUS 严格在线门控与字节流滑窗同步 (对齐 sentry_all/05_云台 实测稳定方案) */
+#define FS_RC_TIMEOUT_MS            100u
 
-/* 连续非法帧计数, 仅 fs_to_rc 内部使用 */
-static uint8_t s_sc_bad_cnt  = 0;
+static uint8_t fs_mode_flag = 0;
+static volatile uint8_t fs_seen = 0;
+static volatile uint8_t fs_fault = 1;
+static volatile uint32_t fs_last_valid_tick = 0;
+static uint8_t fs_partial[SBUS_FRAME_SIZE];
+static uint8_t fs_partial_len = 0;
+static uint32_t fs_partial_ms = 0;
+static uint32_t fs_uart_errors_seen = 0;
 
 /**
- * @brief 把 SBUS 原始开关值映射为 0(上)/1(中)/2(下), 非法值按规则兜底
- * @param idx  channel 下标, 6=SB(CH7), 7=SC(CH8), 8/9=备用
- * @param val  原始 11bit 值
+ * @brief 把 SBUS 原始开关值映射为 0(上)/1(中)/2(下), 落在非法区间返回 -1(拒收整帧, 不再兜底中档)
  */
-static uint16_t fs_map_switch(uint8_t idx, uint16_t val)
+static int16_t fs_decode_switch(uint16_t val)
 {
-    uint16_t result = 0xFFu;   /* 0xFF 表示落在三个合法区间之外 */
-
     if (val > SWITCH_HIGH - SWITCH_TOLERANCE && val < SWITCH_HIGH + SWITCH_TOLERANCE)
-    {
-        result = 2;            /* 下挡 */
-    }
-    else if (val > SWITCH_MID - SWITCH_TOLERANCE && val < SWITCH_MID + SWITCH_TOLERANCE)
-    {
-        result = 1;            /* 中挡 */
-    }
-    else if (val > SWITCH_LOW - SWITCH_TOLERANCE && val < SWITCH_LOW + SWITCH_TOLERANCE)
-    {
-        result = 0;            /* 上挡 */
-    }
-
-    if (idx == 7)                              // ← CH8 = SC, 上档 = 急停
-    {
-        /* SC: 合法帧清零计数, 非法帧累加, 达到阈值才判上档 */
-        if (result != 0xFFu)
-        {
-            s_sc_bad_cnt = 0;
-        }
-        else
-        {
-            if (s_sc_bad_cnt < 0xFFu)
-                s_sc_bad_cnt++;
-
-            result = (s_sc_bad_cnt >= SC_BAD_FRAME_THRESHOLD) ? FS_RC_SW_UP
-                                                              : FS_RC_SW_MID;
-        }
-    }
-    else if (result == 0xFFu)
-    {
-        /* 其他开关: 非法值维持原来的默认中档 */
-        result = FS_RC_SW_MID;
-    }
-
-    return result;
+        return FS_RC_SW_DOWN; /* 2: 下挡 */
+    if (val > SWITCH_MID - SWITCH_TOLERANCE && val < SWITCH_MID + SWITCH_TOLERANCE)
+        return FS_RC_SW_MID;  /* 1: 中挡 */
+    if (val > SWITCH_LOW - SWITCH_TOLERANCE && val < SWITCH_LOW + SWITCH_TOLERANCE)
+        return FS_RC_SW_UP;   /* 0: 上挡 */
+    return -1;
 }
 
 /**
- * @brief 遥控器数据解析
- *
- * @param sbus_buf 接收buffer
+ * @brief 解析一帧已通过帧头/帧尾/flags校验的 SBUS 数据; 仅当 SB/SC 开关均合法才提交
+ * @return 1=合法已提交, 0=开关值非法(整帧拒收)
  */
-static void fs_to_rc(const uint8_t *sbus_buf)
+static uint8_t fs_parse_frame(const uint8_t *sbus_buf)
 {
-    /* SBUS 帧头固定 0x0F, 校验失败直接丢弃本帧 */
-    if (sbus_buf[0] != 0x0F)
-        return;
-    fs_rc_ctrl[TEMP].rc.rocker_r_ = ((sbus_buf[1]     | sbus_buf[2] << 8) & 0x07FF)-1024u;
-    fs_rc_ctrl[TEMP].rc.rocker_r1 = ((sbus_buf[2] >> 3 | sbus_buf[3] << 5) & 0x07FF) -1024u;
-    fs_rc_ctrl[TEMP].rc.rocker_l1 = ((sbus_buf[3] >> 6 | sbus_buf[4] << 2 | sbus_buf[5] << 10) & 0x07FF) - 1024u;
-    fs_rc_ctrl[TEMP].rc.rocker_l_ = ((sbus_buf[5] >> 1 | sbus_buf[6] << 7) & 0x07FF) - 1024u;
+    FS_RC_ctrl_t parsed;
+    memset(&parsed, 0, sizeof(parsed));
 
+    parsed.rc.rocker_r_ = (int16_t)(((sbus_buf[1]      | sbus_buf[2] << 8) & 0x07FF) - 1024);
+    parsed.rc.rocker_r1 = (int16_t)(((sbus_buf[2] >> 3 | sbus_buf[3] << 5) & 0x07FF) - 1024);
+    parsed.rc.rocker_l1 = (int16_t)(((sbus_buf[3] >> 6 | sbus_buf[4] << 2 | sbus_buf[5] << 10) & 0x07FF) - 1024);
+    parsed.rc.rocker_l_ = (int16_t)(((sbus_buf[5] >> 1 | sbus_buf[6] << 7) & 0x07FF) - 1024);
+
+    int16_t *rockers[4] = {
+        &parsed.rc.rocker_l_, &parsed.rc.rocker_l1,
+        &parsed.rc.rocker_r_, &parsed.rc.rocker_r1
+    };
     for (uint8_t i = 0; i < 4; ++i)
-        if (*(&fs_rc_ctrl[TEMP].rc.rocker_l_ + i) > 660){
-             *(&fs_rc_ctrl[TEMP].rc.rocker_l_ + i) = 660;
-        }else if(*(&fs_rc_ctrl[TEMP].rc.rocker_l_ + i) < -660){
-            *(&fs_rc_ctrl[TEMP].rc.rocker_l_ + i) = -660;
-        }
-           
-    /* SBUS 旋钮: 本机 LD 实测 原始 353~1694, 中位 1026
-     * 减 1024 使中位归 0, 与 DBUS 的 ±660 语义一致
-     * 修后: 最右 -671 / 中位 0 / 最左 +670 */
-    fs_rc_ctrl[TEMP].rc.knob_l = ((sbus_buf[6] >> 4 | sbus_buf[7] << 4) & 0x07FF) - 1024;
-    fs_rc_ctrl[TEMP].rc.knob_r = ((sbus_buf[7] >> 7 | sbus_buf[8] << 1 | sbus_buf[9] << 9) & 0x07FF) - 1024;
-    //拨杆0上，1中，2下
-    fs_rc_ctrl[TEMP].channel[6] = ((sbus_buf[9] >> 2 | sbus_buf[10] << 6) & 0x07FF);
-    fs_rc_ctrl[TEMP].channel[7] = ((sbus_buf[10] >> 5 | sbus_buf[11] << 3) & 0x07FF);
-    fs_rc_ctrl[TEMP].channel[8] = ((sbus_buf[12] | sbus_buf[13] << 8 ) & 0x07FF);
-    fs_rc_ctrl[TEMP].channel[9] = ((sbus_buf[13] >> 3 | sbus_buf[14] << 5) & 0x07FF);
-    for (int i = 6; i <= 9; i++)
     {
-        fs_rc_ctrl[TEMP].channel[i] =
-            fs_map_switch((uint8_t)i, fs_rc_ctrl[TEMP].channel[i]);
+        if (*rockers[i] > 660)
+            *rockers[i] = 660;
+        else if (*rockers[i] < -660)
+            *rockers[i] = -660;
     }
 
-    fs_rc_ctrl[TEMP].rc.switch_left_1 = fs_rc_ctrl[TEMP].channel[6];
-    fs_rc_ctrl[TEMP].rc.switch_left_2 = fs_rc_ctrl[TEMP].channel[7];
-    fs_rc_ctrl[TEMP].rc.switch_right_1 = fs_rc_ctrl[TEMP].channel[8];
-    fs_rc_ctrl[TEMP].rc.switch_right_2 = fs_rc_ctrl[TEMP].channel[9];
+    /* SBUS 旋钮: 本机 LD/RD 实测 353~1694, 中位 1026, 减 1024 后最右 -671 / 中位 0 / 最左 +670 */
+    parsed.rc.knob_l = (int16_t)(((sbus_buf[6] >> 4 | sbus_buf[7] << 4) & 0x07FF) - 1024);
+    parsed.rc.knob_r = (int16_t)(((sbus_buf[7] >> 7 | sbus_buf[8] << 1 | sbus_buf[9] << 9) & 0x07FF) - 1024);
 
-    memcpy(&fs_rc_ctrl[LAST], &fs_rc_ctrl[TEMP], sizeof(FS_RC_ctrl_t)); // 保存上一次的数据,用于按键持续按下和切换的判断
+    /* ET08A 8 通道仅使用 CH7=SB(channel[6]) 与 CH8=SC(channel[7]), 校验合法区间后才提交 */
+    uint16_t raw_ch6 = (uint16_t)((sbus_buf[9]  >> 2 | sbus_buf[10] << 6) & 0x07FF);
+    uint16_t raw_ch7 = (uint16_t)((sbus_buf[10] >> 5 | sbus_buf[11] << 3) & 0x07FF);
+    int16_t sw_sb = fs_decode_switch(raw_ch6);
+    int16_t sw_sc = fs_decode_switch(raw_ch7);
+    if (sw_sb < 0 || sw_sc < 0)
+        return 0;
 
+    parsed.channel[6] = sw_sb;
+    parsed.channel[7] = sw_sc;
+    parsed.channel[8] = FS_RC_SW_MID;
+    parsed.channel[9] = FS_RC_SW_MID;
+
+    parsed.rc.switch_left_1  = (uint8_t)parsed.channel[6];
+    parsed.rc.switch_left_2  = (uint8_t)parsed.channel[7];
+    parsed.rc.switch_right_1 = (uint8_t)parsed.channel[8];
+    parsed.rc.switch_right_2 = (uint8_t)parsed.channel[9];
+
+    fs_rc_ctrl[LAST] = fs_rc_ctrl[TEMP];
+    fs_rc_ctrl[TEMP] = parsed;
+    return 1;
+}
+
+static void fs_uart_fault(void)
+{
+    uint32_t irq = __get_PRIMASK();
+    __disable_irq();
+    if (rc_usart_instance != NULL)
+    {
+        uint32_t errors = rc_usart_instance->error_events;
+        if (errors != fs_uart_errors_seen)
+        {
+            fs_uart_errors_seen = errors;
+            fs_partial_len = 0;
+            fs_fault = 1;
+        }
+    }
+    __set_PRIMASK(irq);
+}
+
+static uint8_t fs_accept_frame(const uint8_t *frame, uint32_t now)
+{
+    /* flags 高 4 位必须为 0, 否则必为错位/坏帧 */
+    if (frame[23] & 0xF0u)
+    {
+        fs_fault = 1;
+        return 0;
+    }
+    /* bit3 = Failsafe(遥控关机或失联): 立即置故障, 不喂狗 */
+    if (frame[23] & 0x08u)
+    {
+        fs_fault = 1;
+        return 1;
+    }
+    /* bit2 = 单帧射频 FrameLost: 不立即置故障(防偶发丢包抖动), 仅不喂狗, 连续超时由 FS_RC_TIMEOUT_MS 判离线 */
+    if (frame[23] & 0x04u)
+    {
+        return 1;
+    }
+    if (!fs_parse_frame(frame))
+    {
+        fs_fault = 1;
+        return 0;
+    }
+    fs_last_valid_tick = now;
+    fs_seen = 1;
+    fs_fault = 0;
+    DaemonReload(rc_daemon_instance);
+    return 1;
 }
 
 /**
@@ -207,21 +233,46 @@ static void RemoteControlRxCallback()
 }
 
 /**
- * @brief 对fs_to_rc的简单封装,用于注册到bsp_usart的回调函数中
- *
+ * @brief SBUS 字节流滑窗同步回调: 拒绝短帧/错位帧/非法帧尾/Failsafe 帧
  */
 static void FS_RemoteControlRxCallback(void)
 {
-    uint8_t *buf = rc_usart_instance->recv_buff;
-
-    /* SBUS Failsafe(bit3) / FrameLost(bit2): 遥控关机或丢帧时不喂狗,
-     * 让 RemoteControlIsOnline() 超时归 0, 比赛全自动模式才能接管 */
-    if (buf[0] == 0x0F && (buf[23] & 0x0C) == 0)
+    fs_uart_fault();
+    uint32_t now = HAL_GetTick();
+    if (fs_partial_len && (uint32_t)(now - fs_partial_ms) > 20u)
     {
-        DaemonReload(rc_daemon_instance);
+        fs_partial_len = 0;
+        fs_fault = 1;
     }
 
-    fs_to_rc(buf);   /* 解析照常, 但不再刷新在线计数 */
+    for (uint16_t i = 0; i < rc_usart_instance->recv_len; ++i)
+    {
+        uint8_t byte = rc_usart_instance->recv_buff[i];
+        if (!fs_partial_len && byte != 0x0Fu)
+            continue;
+
+        fs_partial[fs_partial_len++] = byte;
+        fs_partial_ms = now;
+        if (fs_partial_len != SBUS_FRAME_SIZE)
+            continue;
+
+        uint8_t tail_ok = (fs_partial[24] == 0x00u) || ((fs_partial[24] & 0x0Fu) == 0x04u);
+        if (tail_ok && fs_accept_frame(fs_partial, now))
+        {
+            fs_partial_len = 0;
+        }
+        else
+        {
+            if (!tail_ok)
+                fs_fault = 1;
+            uint8_t skip = 1;
+            while (skip < SBUS_FRAME_SIZE && fs_partial[skip] != 0x0Fu)
+                skip++;
+            fs_partial_len = (uint8_t)(SBUS_FRAME_SIZE - skip);
+            if (fs_partial_len > 0)
+                memmove(fs_partial, fs_partial + skip, fs_partial_len);
+        }
+    }
 }
 
 /**
@@ -237,9 +288,22 @@ static void RCLostCallback(void *id)
 
 static void FS_RCLostCallback(void *id)
 {
-    memset(fs_rc_ctrl, 0, sizeof(fs_rc_ctrl)); // 清空遥控器数据
-    USARTServiceInit(rc_usart_instance); // 尝试重新启动接收
-    LOGWARNING("[rc] remote control lost");
+    (void)id;
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    /* 防止守护线程刚判定超时时, 中断恰好收到了有效新帧 */
+    if (fs_seen && !fs_fault && (uint32_t)(HAL_GetTick() - fs_last_valid_tick) <= FS_RC_TIMEOUT_MS)
+    {
+        __set_PRIMASK(primask);
+        return;
+    }
+    uint8_t report = !fs_fault;
+    fs_fault = 1;
+    memset(fs_rc_ctrl, 0, sizeof(fs_rc_ctrl)); // 清空遥控器数据(channel=0 -> 急停上档)
+    __set_PRIMASK(primask);
+    if (report)
+        LOGWARNING("[rc] remote control lost");
+    /* 不在此重启 DMA: DMA 一直处于接收态, 离线时反复重启会把接收机 Failsafe 帧切碎成错位假帧 */
 }
 
 RC_ctrl_t *RemoteControlInit(UART_HandleTypeDef *rc_usart_handle)
@@ -258,12 +322,19 @@ RC_ctrl_t *RemoteControlInit(UART_HandleTypeDef *rc_usart_handle)
     };
     rc_daemon_instance = DaemonRegister(&daemon_conf);
 
+    fs_mode_flag = 0;
     rc_init_flag = 1;
     return rc_ctrl;
 }
 
 FS_RC_ctrl_t *FS_RemoteControlInit(UART_HandleTypeDef *rc_usart_handle)
 {
+    fs_seen = 0;
+    fs_fault = 1;
+    fs_last_valid_tick = 0;
+    fs_partial_len = 0;
+    fs_uart_errors_seen = 0;
+
     USART_Init_Config_s conf;
     conf.module_callback = FS_RemoteControlRxCallback;
     conf.usart_handle = rc_usart_handle;
@@ -278,19 +349,28 @@ FS_RC_ctrl_t *FS_RemoteControlInit(UART_HandleTypeDef *rc_usart_handle)
     };
     rc_daemon_instance = DaemonRegister(&daemon_conf);
 
+    fs_mode_flag = 1;
     rc_init_flag = 1;
     return fs_rc_ctrl;
 }
 
-uint8_t RemoteControlIsOnline()
+uint8_t FS_RemoteControlIsOnline()
 {
+    uint32_t irq = __get_PRIMASK();
+    __disable_irq();
     if (rc_init_flag)
-        return DaemonIsOnline(rc_daemon_instance);
-    return 0;
+        fs_uart_fault();
+    uint8_t online = (uint8_t)(rc_init_flag && fs_seen && !fs_fault &&
+                               (uint32_t)(HAL_GetTick() - fs_last_valid_tick) <= FS_RC_TIMEOUT_MS);
+    __set_PRIMASK(irq);
+    return online;
 }
 
-uint8_t FS_RemoteControlIsOnline(){
-    if (rc_init_flag)
-        return DaemonIsOnline(rc_daemon_instance);
-    return 0;
+uint8_t RemoteControlIsOnline()
+{
+    if (!rc_init_flag)
+        return 0;
+    if (fs_mode_flag)
+        return FS_RemoteControlIsOnline();
+    return DaemonIsOnline(rc_daemon_instance);
 }
