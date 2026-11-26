@@ -1,6 +1,7 @@
 // app
 #include "robot_def.h"
 #include "robot_cmd.h"
+#include "gimbal.h"
 // module
 #include "remote_control.h"
 #include "ins_task.h"
@@ -130,12 +131,7 @@ static void FS2RC_Adapt(void)
     if (switch_is_mid(rc_compat[LAST].rc.switch_left) &&
         switch_is_down(rc_compat[TEMP].rc.switch_left))
     {
-        float cur_yaw = (float)gimbal_fetch_data.yaw_motor_single_round_angle - YAW_ALIGN_ANGLE;
-
-        if (cur_yaw >  180.0f) cur_yaw -= 360.0f;
-        if (cur_yaw < -180.0f) cur_yaw += 360.0f;
-
-        gimbal_cmd_send.yaw = cur_yaw;
+        gimbal_cmd_send.yaw = GimbalGetYawCmdCurrent();
         {
             float cur_pitch = -gimbal_fetch_data.gimbal_imu_data.Pitch;
             if (cur_pitch > PITCH_MAX_ANGLE) cur_pitch = PITCH_MAX_ANGLE;
@@ -248,12 +244,8 @@ void RobotCMDInit()
  */
 static void YawSetCurrent(void)
 {
-    float cur_yaw = (float)gimbal_fetch_data.yaw_motor_single_round_angle - YAW_ALIGN_ANGLE;
-
-    while (cur_yaw >  180.0f) cur_yaw -= 360.0f;
-    while (cur_yaw < -180.0f) cur_yaw += 360.0f;
-
-    gimbal_cmd_send.yaw = cur_yaw;
+    /* 与 GimbalTask 使用同一 IMU 基准(YawTotalAngle - yaw_mech_off), 消除急停恢复时的目标跳变 */
+    gimbal_cmd_send.yaw = GimbalGetYawCmdCurrent();
 }
 
 /**

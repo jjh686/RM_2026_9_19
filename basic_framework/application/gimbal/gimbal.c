@@ -113,9 +113,14 @@ static float GimbalPitchSpeedUpdate(void *context, PIDInstance *pid,
     const float neg_cap = fminf(PITCH_SPEED_LIMIT_RAD_S,
                                 sqrtf(2.0f * PITCH_BRAKE_RAD_S2 * fmaxf(0.0f, fminf(-angle_err, neg_dist))));
 
-    float target_v = PitchClamp(raw_ref_rad_s, -neg_cap, pos_cap);
+    /* 静止到位防粘滑积分极限环: 角度误差在 ±0.25° 且几乎静止(|gyro| < 0.05 rad/s)时,
+     * 令参考速度归零并冻结积分(保留当前 pi_i 托举重力, 不再憋破静摩擦猛跳) */
+    const uint8_t pitch_hold_locked =
+        (fabsf(angle_err) < (0.25f * DEGREE_2_RAD)) && (fabsf(measure_rad_s) < 0.05f);
+
+    float target_v = pitch_hold_locked ? 0.0f : PitchClamp(raw_ref_rad_s, -neg_cap, pos_cap);
     float next_v   = PitchApproach(st->speed_ref_rad_s, target_v, PITCH_ACCEL_RAD_S2 * dt_s);
-    float ref_rad_s = PitchClamp(next_v, -neg_cap, pos_cap);
+    float ref_rad_s = pitch_hold_locked ? 0.0f : PitchClamp(next_v, -neg_cap, pos_cap);
     st->speed_ref_rad_s = ref_rad_s;
 
     /* 2. 条件抗饱和梯形积分速度 PI (移植自 05_云台 GimbalSpeedPiStep, 无输出低通) */
@@ -128,7 +133,7 @@ static float GimbalPitchSpeedUpdate(void *context, PIDInstance *pid,
     const float err = ref_rad_s - measure_rad_s;
     const float p   = kp * err;
     const float prev_err = st->pi_prev_valid ? st->pi_prev_err : err;
-    const float delta_i  = ki * 0.5f * (err + prev_err) * dt_s;
+    const float delta_i  = pitch_hold_locked ? 0.0f : (ki * 0.5f * (err + prev_err) * dt_s);
 
     float cand_i   = PitchClamp(st->pi_i + delta_i, -i_limit, i_limit);
     float cand_out = p + cand_i;
@@ -216,7 +221,7 @@ void GimbalInit()
         .controller_param_init_config = {
             .angle_PID = {
                 .Kp = 6,
-                .Ki = 0.2f,
+                .Ki = 0.0f, /* 外环纯P, 避免积分在 0.15° 死区边缘突变导致 GM6020 原地抽动 */
                 .Kd = 0,
                 .DeadBand = 0.15f,
                 .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement | PID_OutputFilter,
@@ -341,6 +346,16 @@ void GimbalUpdatePitchFeedback(void)
     }
 }
 
+float GimbalGetYawCmdCurrent(void)
+{
+    if (gimba_IMU_data == NULL || !yaw_zero_done)
+        return 0.0f;
+    float cur = gimba_IMU_data->YawTotalAngle - yaw_mech_off;
+    while (cur >  180.0f) cur -= 360.0f;
+    while (cur < -180.0f) cur += 360.0f;
+    return cur;
+}
+
 /* 机器人云台控制核心任务 (200Hz) */
 void GimbalTask()
 {
@@ -401,6 +416,8 @@ void GimbalTask()
     {
     case GIMBAL_ZERO_FORCE:
         DJIMotorStop(yaw_motor);
+        PIDClear(&yaw_motor->motor_controller.angle_PID);
+        PIDClear(&yaw_motor->motor_controller.speed_PID);
         DMMotorStop(pitch_motor);
         break;
 

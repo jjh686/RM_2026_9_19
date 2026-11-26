@@ -24,4 +24,9 @@ void GimbalUpdateYawGyroDeg(void);
  */
 void GimbalUpdatePitchFeedback(void);
 
+/**
+ * @brief 返回当前 IMU 姿态对应的 gimbal_cmd_send.yaw(度, 归一到 ±180), 用于急停/切档零跳变原地接管
+ */
+float GimbalGetYawCmdCurrent(void);
+
 #endif // GIMBAL_H

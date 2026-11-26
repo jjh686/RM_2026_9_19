@@ -46,6 +46,5 @@
         "orbit"
     ],
     "orbit.defaultProgram": "d:\\STM32project\\RM\\changing\\basic_framework-master\\basic_framework-master\\basic_framework\\build\\basic_framework.elf",
-    "emberprobe.sampleFrequencyHz": 100
 }
 
